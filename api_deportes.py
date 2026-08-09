@@ -48,6 +48,14 @@ LIGAS = [
     {"clave": "champions", "ids": ["4480"], "nombre_visible": "Champions League"},
 ]
 
+# Equipos que se destacan sin importar la competicion (amistosos, etc
+# incluidos). A diferencia de LIGAS, aca se busca por equipo, no por
+# torneo, asi no importa en que competicion jueguen.
+EQUIPOS_DESTACADOS = [
+    {"clave": "boca", "id": "135156", "nombre_visible": "Boca Juniors"},
+    {"clave": "seleccion", "id": "134509", "nombre_visible": "Selecci\u00f3n Argentina"},
+]
+
 # Para algunas competiciones solo interesa un equipo puntual, no toda
 # la liga (ej: de la MLS solo importa cuando juega el Inter Miami).
 FILTRO_EQUIPO = {
@@ -125,6 +133,8 @@ def _evento_a_partido(ev, nombre_visible):
         "local": ev.get("strHomeTeam") or "?",
         "visitante": ev.get("strAwayTeam") or "?",
         "fecha": dt,
+        "destacado": False,
+        "equipo_destacado": None,
     }
 
 
@@ -198,22 +208,65 @@ def _proximos_por_liga(liga, log):
     return partidos
 
 
+def _proximos_por_equipo(equipo, log):
+    """
+    Trae los proximos partidos de un equipo puntual (Boca, Seleccion
+    Argentina) sin importar la competicion -- asi se cubren tambien
+    amistosos, eliminatorias, torneos amistosos de verano, etc, que no
+    entran en la lista fija de competiciones de LIGAS. TheSportsDB
+    devuelve hasta 15 proximos eventos del equipo; se descartan los que
+    no caen hoy en horario argentino.
+    """
+    hoy_arg = _fecha_hoy_arg()
+    datos = _pedir(f"{BASE_URL}/eventsnext.php", {"id": equipo["id"]}, log,
+                    f"{equipo['nombre_visible']} (proximos partidos)")
+    eventos = (datos.get("events") if datos else None) or []
+
+    partidos = []
+    for ev in eventos:
+        nombre_torneo = ev.get("strLeague") or "Amistoso"
+        p = _evento_a_partido(ev, nombre_torneo)
+        if not p or p["fecha"].date() != hoy_arg:
+            continue
+        p["destacado"] = True
+        p["equipo_destacado"] = equipo["nombre_visible"]
+        partidos.append(p)
+
+    if not partidos:
+        log(f"[INFO] {equipo['nombre_visible']}: sin partidos hoy.")
+    else:
+        log(f"[INFO] {equipo['nombre_visible']}: {len(partidos)} partido(s) hoy "
+            f"(destacado).")
+
+    return partidos
+
+
 def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
     """
-    Combina dos fuentes: ESPN (la mas completa y estable en la
-    practica) y TheSportsDB al final rellenando lo que falte. Si una
-    falla por completo, la otra sigue funcionando igual.
+    Combina tres fuentes: ESPN y TheSportsDB por competicion, mas
+    TheSportsDB por equipo (Boca, Seleccion Argentina) para agarrar
+    tambien amistosos y demas partidos fuera de las competiciones
+    trackeadas. El mismo partido puede aparecer por dos fuentes
+    distintas (ej: Boca jugando la Libertadores) -- en ese caso no se
+    duplica, se marca destacado sobre el que ya estaba.
     """
     partidos = []
-    vistos = set()
+
+    def _mismo_partido(a, b):
+        return (
+            a["local"].strip().lower() == b["local"].strip().lower()
+            and a["visitante"].strip().lower() == b["visitante"].strip().lower()
+            and abs((a["fecha"] - b["fecha"]).total_seconds()) < 3 * 3600
+        )
 
     def _agregar(lista):
         for p in lista:
-            clave = (p["competicion"], p["local"].strip().lower(),
-                     p["visitante"].strip().lower(), p["fecha"])
-            if clave in vistos:
+            existente = next((q for q in partidos if _mismo_partido(p, q)), None)
+            if existente:
+                if p.get("destacado") and not existente.get("destacado"):
+                    existente["destacado"] = True
+                    existente["equipo_destacado"] = p.get("equipo_destacado")
                 continue
-            vistos.add(clave)
             partidos.append(p)
 
     try:
@@ -223,6 +276,12 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
 
     for liga in LIGAS:
         _agregar(_proximos_por_liga(liga, log))
+
+    for equipo in EQUIPOS_DESTACADOS:
+        try:
+            _agregar(_proximos_por_equipo(equipo, log))
+        except Exception as e:
+            log(f"[ERROR] {equipo['nombre_visible']} fallo por completo: {e}")
 
     partidos.sort(key=lambda p: p["fecha"])
     return partidos
@@ -266,6 +325,8 @@ def _evento_espn_a_partido(ev, nombre_visible):
         "local": local,
         "visitante": visitante,
         "fecha": dt,
+        "destacado": False,
+        "equipo_destacado": None,
     }
 
 
