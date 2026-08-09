@@ -318,8 +318,12 @@ class App:
             return
         for p in self.partidos[:15]:
             fecha_txt = p["fecha"].strftime("%d/%m %H:%M")
-            texto = f"{fecha_txt}   {p['local']} vs {p['visitante']}   ({p['competicion']})"
+            estrella = "\u2b50 " if p.get("destacado") else ""
+            texto = f"{estrella}{fecha_txt}   {p['local']} vs {p['visitante']}   ({p['competicion']})"
+            indice = self.lista_partidos.size()
             self.lista_partidos.insert(tk.END, texto)
+            if p.get("destacado"):
+                self.lista_partidos.itemconfig(indice, fg="#b8860b")
 
     def _chequear_avisos_previos(self):
         if not self.partidos:
@@ -332,7 +336,11 @@ class App:
                 continue
             delta_minutos = (p["fecha"] - ahora).total_seconds() / 60
             if 0 <= delta_minutos <= minutos_previo:
-                self._avisar_partido(p)
+                if p.get("destacado"):
+                    self._avisar_partido(p)
+                else:
+                    log(f"Partido por arrancar (sin notificacion push): "
+                        f"{p['local']} vs {p['visitante']} ({p['competicion']})")
                 self.notificados.add(p["id"])
                 cambios = True
         if cambios:
