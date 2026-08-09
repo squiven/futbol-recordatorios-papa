@@ -1,0 +1,7 @@
+# Nunca subir esto: tiene tu API key personal y el estado del temporizador
+config.json
+
+# Archivos generados en cada compu, no son parte del codigo
+registro.log
+__pycache__/
+*.pyc
