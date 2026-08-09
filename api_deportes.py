@@ -9,7 +9,9 @@ bot de Discord de Sebi para estas mismas competiciones.
 import json
 import os
 import time
+import unicodedata
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 
 import requests
 
@@ -115,7 +117,25 @@ def _pedir(url, params, log, contexto, intentos=3):
     return resultado
 
 
-def _evento_a_partido(ev, nombre_visible):
+_cache_escudos = {}
+
+
+def _escudo_thesportsdb(team_id, log):
+    """Busca el escudo de un equipo de TheSportsDB por su ID, cacheado
+    en memoria para no repetir el pedido si aparece varias veces."""
+    if not team_id:
+        return None
+    if team_id in _cache_escudos:
+        return _cache_escudos[team_id]
+    datos = _pedir(f"{BASE_URL}/lookupteam.php", {"id": team_id}, log,
+                    f"escudo equipo {team_id}")
+    equipos = (datos.get("teams") if datos else None) or []
+    url = equipos[0].get("strTeamBadge") if equipos else None
+    _cache_escudos[team_id] = url
+    return url
+
+
+def _evento_a_partido(ev, nombre_visible, log=print):
     fecha_str = ev.get("dateEvent")
     hora_str = ev.get("strTime")
     if not fecha_str or not hora_str or hora_str in ("00:00:00", ""):
@@ -135,6 +155,16 @@ def _evento_a_partido(ev, nombre_visible):
         "fecha": dt,
         "destacado": False,
         "equipo_destacado": None,
+        # El escudo NO se busca aca: se busca despues, en
+        # obtener_proximos_partidos, y solo para los partidos que
+        # sobreviven al filtrado y al deduplicado. Buscarlo aca (por
+        # cada evento crudo, incluso los que despues se descartan)
+        # multiplica los pedidos y choca enseguida contra el limite de
+        # pedidos por minuto de la API gratuita.
+        "escudo_local": None,
+        "escudo_visitante": None,
+        "_tsdb_id_local": ev.get("idHomeTeam"),
+        "_tsdb_id_visitante": ev.get("idAwayTeam"),
     }
 
 
@@ -189,7 +219,7 @@ def _proximos_por_liga(liga, log):
             log(f"    -> {liga['nombre_visible']} id {liga_id} dia {dia}: "
                 f"{len(eventos)} evento(s) crudos de la API")
             for ev in eventos:
-                p = _evento_a_partido(ev, liga["nombre_visible"])
+                p = _evento_a_partido(ev, liga["nombre_visible"], log)
                 if not p or p["fecha"].date() != hoy_arg:
                     continue
                 if filtro:
@@ -225,7 +255,7 @@ def _proximos_por_equipo(equipo, log):
     partidos = []
     for ev in eventos:
         nombre_torneo = ev.get("strLeague") or "Amistoso"
-        p = _evento_a_partido(ev, nombre_torneo)
+        p = _evento_a_partido(ev, nombre_torneo, log)
         if not p or p["fecha"].date() != hoy_arg:
             continue
         p["destacado"] = True
@@ -241,6 +271,28 @@ def _proximos_por_equipo(equipo, log):
     return partidos
 
 
+def _texto_normalizado(s):
+    """Minusculas, sin acentos, sin espacios de mas -- para comparar
+    nombres de equipo que vienen de distintas fuentes."""
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
+    return " ".join(s.lower().strip().split())
+
+
+def _mismo_equipo(nombre_a, nombre_b):
+    """
+    ESPN y TheSportsDB no siempre nombran igual al mismo equipo (ej:
+    'Gimnasia La Plata' vs 'Gimnasia y Esgrima de La Plata'). Se
+    considera el mismo equipo si el nombre es identico, si uno esta
+    contenido en el otro, o si son lo bastante parecidos.
+    """
+    a, b = _texto_normalizado(nombre_a), _texto_normalizado(nombre_b)
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    return SequenceMatcher(None, a, b).ratio() >= 0.6
+
+
 def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
     """
     Combina tres fuentes: ESPN y TheSportsDB por competicion, mas
@@ -253,10 +305,11 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
     partidos = []
 
     def _mismo_partido(a, b):
+        if abs((a["fecha"] - b["fecha"]).total_seconds()) >= 3 * 3600:
+            return False
         return (
-            a["local"].strip().lower() == b["local"].strip().lower()
-            and a["visitante"].strip().lower() == b["visitante"].strip().lower()
-            and abs((a["fecha"] - b["fecha"]).total_seconds()) < 3 * 3600
+            _mismo_equipo(a["local"], b["local"])
+            and _mismo_equipo(a["visitante"], b["visitante"])
         )
 
     def _agregar(lista):
@@ -266,6 +319,14 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
                 if p.get("destacado") and not existente.get("destacado"):
                     existente["destacado"] = True
                     existente["equipo_destacado"] = p.get("equipo_destacado")
+                if not existente.get("escudo_local") and p.get("escudo_local"):
+                    existente["escudo_local"] = p["escudo_local"]
+                if not existente.get("escudo_visitante") and p.get("escudo_visitante"):
+                    existente["escudo_visitante"] = p["escudo_visitante"]
+                if not existente.get("_tsdb_id_local") and p.get("_tsdb_id_local"):
+                    existente["_tsdb_id_local"] = p["_tsdb_id_local"]
+                if not existente.get("_tsdb_id_visitante") and p.get("_tsdb_id_visitante"):
+                    existente["_tsdb_id_visitante"] = p["_tsdb_id_visitante"]
                 continue
             partidos.append(p)
 
@@ -284,6 +345,16 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
             log(f"[ERROR] {equipo['nombre_visible']} fallo por completo: {e}")
 
     partidos.sort(key=lambda p: p["fecha"])
+
+    # Recien aca, uno por uno y solo para los partidos que quedaron en
+    # la lista final (ya filtrados y deduplicados), se completa el
+    # escudo que todavia falte (el que no vino ya resuelto por ESPN).
+    for p in partidos:
+        if not p.get("escudo_local") and p.get("_tsdb_id_local"):
+            p["escudo_local"] = _escudo_thesportsdb(p["_tsdb_id_local"], log)
+        if not p.get("escudo_visitante") and p.get("_tsdb_id_visitante"):
+            p["escudo_visitante"] = _escudo_thesportsdb(p["_tsdb_id_visitante"], log)
+
     return partidos
 
 
@@ -312,12 +383,16 @@ def _evento_espn_a_partido(ev, nombre_visible):
     competencias = ev.get("competitions") or [{}]
     competidores = (competencias[0] or {}).get("competitors") or []
     local = visitante = "?"
+    escudo_local = escudo_visitante = None
     for c in competidores:
         nombre_equipo = (c.get("team") or {}).get("displayName") or "?"
+        logo = (c.get("team") or {}).get("logo")
         if c.get("homeAway") == "home":
             local = nombre_equipo
+            escudo_local = logo
         elif c.get("homeAway") == "away":
             visitante = nombre_equipo
+            escudo_visitante = logo
 
     return {
         "id": f"espn-{ev.get('id')}",
@@ -327,6 +402,8 @@ def _evento_espn_a_partido(ev, nombre_visible):
         "fecha": dt,
         "destacado": False,
         "equipo_destacado": None,
+        "escudo_local": escudo_local,
+        "escudo_visitante": escudo_visitante,
     }
 
 
