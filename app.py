@@ -596,7 +596,8 @@ class App:
 
     def _descargar_escudo(self, url, tamano):
         try:
-            r = requests.get(url, timeout=8)
+            headers = {"User-Agent": "FutbolYRecordatorios/1.0 (uso personal, app de escritorio)"}
+            r = requests.get(url, timeout=8, headers=headers)
             r.raise_for_status()
             img = Image.open(io.BytesIO(r.content)).convert("RGBA")
             img.thumbnail((tamano, tamano), Image.LANCZOS)
@@ -695,6 +696,7 @@ class App:
         cv.create_text(bxm, by1 + 34, text=p["fecha"].strftime("%d/%m"),
                         font=self._f_fecha, fill=badge_fg)
 
+        cv._referencias = []
         x = 104
 
         # --- escudo local ---
@@ -702,7 +704,6 @@ class App:
         ym = alto_fila / 2
         if img_local:
             cv.create_image(x + 17, ym, image=img_local)
-            cv._referencias = getattr(cv, "_referencias", [])
             cv._referencias.append(img_local)
         else:
             cv.create_text(x + 17, ym, text="\u26bd", font=("Segoe UI Emoji", 14),
