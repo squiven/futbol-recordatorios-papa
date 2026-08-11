@@ -37,6 +37,8 @@ ESPN_LIGAS = {
 }
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+ESCUDOS_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "escudos_cache.json")
 
 # IDs de TheSportsDB para las competiciones que le interesan a papa.
 # Son los mismos IDs que ya estan probados y funcionando en el bot de
@@ -118,13 +120,220 @@ def _pedir(url, params, log, contexto, intentos=3):
 
 
 _cache_escudos = {}
+_cache_escudos_wikidata = {}
+
+
+def _cargar_cache_escudos_disco():
+    """
+    Cache PERSISTENTE (en un archivo aparte, no se sube a GitHub) de
+    escudos ya encontrados. Es la forma real de no chocar todo el
+    tiempo con los limites de las APIs gratuitas: una vez que se
+    encuentra el escudo de un equipo, no hace falta volver a
+    preguntarle a nadie nunca mas por ese mismo equipo. Solo se
+    guardan los que SI se encontraron -- los que fallaron se vuelven a
+    intentar en el proximo refresco, por si el fallo fue solo por
+    limite de pedidos y no porque el equipo realmente no tenga escudo
+    en ningun lado.
+    """
+    try:
+        with open(ESCUDOS_CACHE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _guardar_cache_escudos_disco():
+    try:
+        with open(ESCUDOS_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(_cache_escudos_disco, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+_cache_escudos_disco = _cargar_cache_escudos_disco()
+
+WIKIMEDIA_HEADERS = {
+    # Wikidata/Wikimedia exige un User-Agent descriptivo (y a veces es
+    # mas estricto todavia con clientes que no se identifican bien).
+    "User-Agent": "FutbolYRecordatorios/1.0 (app de escritorio de uso personal; "
+                   "contacto: uso-personal@localhost)"
+}
+
+
+def _pedir_wikidata(params, log, contexto):
+    """Igual que _pedir, pero para la API de Wikidata. A diferencia de
+    TheSportsDB, ac\u00e1 NO conviene reintentar con esperas largas: el
+    limite de Wikidata resulto ser lo bastante estricto como para que
+    insistir simplemente alargue el ciclo varios minutos sin mejorar
+    mucho la tasa de exito. Mejor un solo intento rapido y, si falla,
+    pasarle la posta enseguida a Wikipedia (la siguiente fuente)."""
+    try:
+        r = requests.get("https://www.wikidata.org/w/api.php", params=params,
+                          headers=WIKIMEDIA_HEADERS, timeout=8)
+        if r.status_code == 429:
+            log(f"[AVISO] {contexto}: Wikidata esta al limite de pedidos "
+                f"ahora mismo, se prueba directo con Wikipedia.")
+            return None
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log(f"[AVISO] {contexto}: {e}")
+        return None
+    finally:
+        time.sleep(0.3)
+
+
+def _escudo_wikidata(nombre_equipo, log):
+    """
+    Segunda fuente de escudos, para equipos que TheSportsDB no tiene
+    (le pasa con clubes chicos: rondas previas de la Champions, equipos
+    de ligas sudamericanas menores, etc). Busca el equipo en Wikidata y
+    usa su propiedad "logo image" (P154), que es especificamente el
+    escudo/logo (no una foto cualquiera del club).
+
+    El nombre de un equipo suele ser ambiguo en Wikidata (ej: "Lyon" es
+    ante todo la ciudad francesa, no el club; "NEC" es tambien una
+    marca de electronica) asi que se piden varios resultados y se
+    prioriza el que tenga pinta de club de futbol segun su
+    descripcion, en vez de quedarse a ciegas con el primero.
+    """
+    if not nombre_equipo or nombre_equipo == "?":
+        return None
+    if nombre_equipo in _cache_escudos_wikidata:
+        return _cache_escudos_wikidata[nombre_equipo]
+
+    _cache_escudos_wikidata[nombre_equipo] = None  # por si algo falla a mitad de camino
+
+    qid = _buscar_qid_club(nombre_equipo, log)
+    if not qid:
+        return None
+
+    datos2 = _pedir_wikidata(
+        {"action": "wbgetclaims", "entity": qid, "property": "P154", "format": "json"},
+        log, f"escudo (wikidata, logo) {nombre_equipo}",
+    )
+    claims = ((datos2.get("claims") if datos2 else None) or {}).get("P154")
+    if not claims:
+        return None
+
+    try:
+        archivo = claims[0]["mainsnak"]["datavalue"]["value"]
+    except (KeyError, IndexError):
+        return None
+
+    archivo = archivo.replace(" ", "_")
+    url = f"https://commons.wikimedia.org/wiki/Special:FilePath/{archivo}?width=200"
+    _cache_escudos_wikidata[nombre_equipo] = url
+    return url
+
+
+_cache_escudos_wikipedia = {}
+
+
+def _escudo_wikipedia(nombre_equipo, log):
+    """
+    Tercera fuente de escudos. Distinta a Wikidata (otro endpoint dentro
+    de Wikimedia, con limites de pedidos bastante mas generosos en la
+    practica) asi que sirve de red de contencion cuando Wikidata no
+    tiene el equipo cargado o esta frenando por limite de pedidos.
+    Busca el articulo de Wikipedia del equipo y usa la imagen principal
+    del articulo -- en la gran mayoria de los clubes de futbol esa
+    imagen ES el escudo (asi arma el infobox Wikipedia), aunque no hay
+    garantia absoluta como con el campo "logo" especifico de Wikidata.
+    """
+    if not nombre_equipo or nombre_equipo == "?":
+        return None
+    if nombre_equipo in _cache_escudos_wikipedia:
+        return _cache_escudos_wikipedia[nombre_equipo]
+
+    _cache_escudos_wikipedia[nombre_equipo] = None
+
+    try:
+        r = requests.get(
+            "https://es.wikipedia.org/w/api.php",
+            params={"action": "query", "generator": "search",
+                    "gsrsearch": f"{nombre_equipo} club de futbol",
+                    "gsrlimit": 1, "prop": "pageimages", "piprop": "thumbnail",
+                    "pithumbsize": 200, "format": "json"},
+            headers=WIKIMEDIA_HEADERS, timeout=8,
+        )
+        r.raise_for_status()
+        paginas = ((r.json().get("query") or {}).get("pages")) or {}
+        for pagina in paginas.values():
+            thumb = (pagina.get("thumbnail") or {}).get("source")
+            if thumb:
+                _cache_escudos_wikipedia[nombre_equipo] = thumb
+                return thumb
+    except Exception as e:
+        log(f"[AVISO] Wikipedia no tenia imagen para '{nombre_equipo}': {e}")
+
+    time.sleep(0.3)
+    return None
+
+
+PALABRAS_CLUB = ("futbol", "football", "voetbal", "fussball", "fußball", "soccer")
+
+
+def _buscar_qid_club(nombre_equipo, log):
+    """Busca el nombre en Wikidata y devuelve el QID que mejor pinta
+    tenga de ser un club de futbol (mirando la descripcion corta que
+    ya viene en el mismo pedido de busqueda), en vez de asumir que el
+    primer resultado es el correcto."""
+    datos = _pedir_wikidata(
+        {"action": "wbsearchentities", "search": nombre_equipo, "language": "es",
+         "format": "json", "type": "item", "limit": 6},
+        log, f"escudo (wikidata, busqueda) {nombre_equipo}",
+    )
+    if datos is None:
+        # El pedido fallo de verdad (ej: choco contra el limite de
+        # pedidos incluso despues de reintentar). No tiene sentido
+        # insistir con una segunda busqueda ahora mismo -- mejor
+        # rendirse por este equipo en este ciclo y no perder mas
+        # tiempo; si vuelve a hacer falta en el proximo refresco, se
+        # intenta de nuevo.
+        return None
+
+    resultados = datos.get("search") or []
+    if not resultados:
+        # Reintento simple: si el nombre tiene mas de una palabra (ej.
+        # "NEC Nijmegen"), a veces el club en Wikidata solo tiene
+        # cargada la primera ("NEC") y la busqueda completa no
+        # encuentra nada. Esto solo tiene sentido si la busqueda
+        # anterior SI respondio (y solo vino vacia), no si fallo por
+        # limite de pedidos.
+        primera_palabra = nombre_equipo.split(" ")[0]
+        if primera_palabra != nombre_equipo:
+            datos2 = _pedir_wikidata(
+                {"action": "wbsearchentities", "search": primera_palabra,
+                 "language": "es", "format": "json", "type": "item", "limit": 6},
+                log, f"escudo (wikidata, busqueda 2) {nombre_equipo}",
+            )
+            resultados = (datos2.get("search") if datos2 else None) or []
+        if not resultados:
+            return None
+
+    for r in resultados:
+        descripcion = _texto_normalizado(r.get("description") or "")
+        if any(palabra in descripcion for palabra in PALABRAS_CLUB):
+            return r["id"]
+
+    # Ninguna descripcion menciona futbol -- probablemente ninguno de
+    # los resultados es el club (ej: solo aparecio la ciudad). Mejor
+    # no arriesgarse a poner un escudo equivocado.
+    return None
 
 
 def _escudo_thesportsdb(team_id, log):
-    """Busca el escudo de un equipo de TheSportsDB por su ID, cacheado
-    en memoria para no repetir el pedido si aparece varias veces."""
+    """Busca el escudo de un equipo de TheSportsDB por su ID. Primero
+    mira la cache en disco (para no volver a preguntar nunca mas por
+    un equipo ya encontrado en una corrida anterior), despues la
+    cache en memoria de esta corrida, y solo si no esta en ninguna de
+    las dos hace el pedido de verdad."""
     if not team_id:
         return None
+    clave_disco = f"tsdb:{team_id}"
+    if clave_disco in _cache_escudos_disco:
+        return _cache_escudos_disco[clave_disco]
     if team_id in _cache_escudos:
         return _cache_escudos[team_id]
     datos = _pedir(f"{BASE_URL}/lookupteam.php", {"id": team_id}, log,
@@ -132,6 +341,9 @@ def _escudo_thesportsdb(team_id, log):
     equipos = (datos.get("teams") if datos else None) or []
     url = equipos[0].get("strTeamBadge") if equipos else None
     _cache_escudos[team_id] = url
+    if url:
+        _cache_escudos_disco[clave_disco] = url
+        _guardar_cache_escudos_disco()
     return url
 
 
@@ -348,14 +560,39 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
 
     # Recien aca, uno por uno y solo para los partidos que quedaron en
     # la lista final (ya filtrados y deduplicados), se completa el
-    # escudo que todavia falte (el que no vino ya resuelto por ESPN).
+    # escudo que todavia falte, probando en orden: ID de TheSportsDB
+    # (rapido, si el evento vino de ahi) -> cache en disco por nombre
+    # (equipo ya encontrado en una corrida anterior, no pregunta de
+    # nuevo) -> Wikidata por nombre -> Wikipedia por nombre (red de
+    # contencion final) -> si ninguna lo tiene, se deja el escudo
+    # generico.
     for p in partidos:
-        if not p.get("escudo_local") and p.get("_tsdb_id_local"):
-            p["escudo_local"] = _escudo_thesportsdb(p["_tsdb_id_local"], log)
-        if not p.get("escudo_visitante") and p.get("_tsdb_id_visitante"):
-            p["escudo_visitante"] = _escudo_thesportsdb(p["_tsdb_id_visitante"], log)
+        p["escudo_local"] = _completar_escudo(p.get("escudo_local"), p["local"],
+                                               p.get("_tsdb_id_local"), log)
+        p["escudo_visitante"] = _completar_escudo(p.get("escudo_visitante"), p["visitante"],
+                                                   p.get("_tsdb_id_visitante"), log)
 
     return partidos
+
+
+def _completar_escudo(escudo_actual, nombre_equipo, tsdb_id, log):
+    if escudo_actual:
+        return escudo_actual
+
+    if tsdb_id:
+        escudo_actual = _escudo_thesportsdb(tsdb_id, log)
+        if escudo_actual:
+            return escudo_actual
+
+    clave_disco = f"wiki:{_texto_normalizado(nombre_equipo)}"
+    if clave_disco in _cache_escudos_disco:
+        return _cache_escudos_disco[clave_disco]
+
+    escudo_actual = _escudo_wikidata(nombre_equipo, log) or _escudo_wikipedia(nombre_equipo, log)
+    if escudo_actual:
+        _cache_escudos_disco[clave_disco] = escudo_actual
+        _guardar_cache_escudos_disco()
+    return escudo_actual
 
 
 def _parsear_fecha_iso_utc(texto):
