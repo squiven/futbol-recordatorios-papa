@@ -19,7 +19,8 @@ CARPETA = os.path.dirname(os.path.abspath(__file__))
 VERSION_PATH = os.path.join(CARPETA, "version.txt")
 
 # Archivos/carpetas que NUNCA se tocan al actualizar.
-NO_TOCAR = {"config.json", "registro.log", "__pycache__", ".git", ".gitignore"}
+NO_TOCAR = {"config.json", "registro.log", "escudos_cache.json", "__pycache__",
+            ".git", ".gitignore"}
 
 
 def _version_local():
