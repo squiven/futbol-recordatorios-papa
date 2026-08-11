@@ -3,5 +3,6 @@ config.json
 
 # Archivos generados en cada compu, no son parte del codigo
 registro.log
+escudos_cache.json
 __pycache__/
 *.pyc
