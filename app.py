@@ -11,6 +11,7 @@ Programa de recordatorios para papa:
 Para arrancar el programa: doble click en iniciar.bat
 """
 
+import hashlib
 import io
 import os
 import threading
@@ -41,6 +42,7 @@ import actualizador
 
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "registro.log")
 ICONO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icono.ico")
+ESCUDOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "escudos_cache")
 
 ANCHO_VENTANA = 760
 ALTO_VENTANA = 760
@@ -580,6 +582,17 @@ class App:
         ventana.focus_force()
 
     # ---------------- ESCUDOS ----------------
+    def _ruta_escudo_en_disco(self, url, tamano):
+        """Todos los escudos ya procesados (recortados y del tamano
+        justo que se usa en pantalla) se guardan como archivos .png
+        sueltos en la carpeta escudos_cache/, aparte del resto del
+        codigo. El nombre de archivo es un hash del link original,
+        para no depender de caracteres raros que traigan los nombres
+        de equipo."""
+        os.makedirs(ESCUDOS_DIR, exist_ok=True)
+        nombre = hashlib.sha1(url.encode("utf-8")).hexdigest()
+        return os.path.join(ESCUDOS_DIR, f"{nombre}_{tamano}.png")
+
     def _obtener_imagen_escudo(self, url, tamano=34):
         if not url:
             return None
@@ -589,6 +602,20 @@ class App:
             return None
         if actual is not None:
             return actual
+
+        # Antes de salir a internet, se fija si ya la tiene guardada
+        # en disco de una corrida anterior (esto es lo que hace que,
+        # con el tiempo, cada vez haga falta pedirle menos cosas a las
+        # APIs externas).
+        ruta = self._ruta_escudo_en_disco(url, tamano)
+        if os.path.exists(ruta):
+            try:
+                foto = ImageTk.PhotoImage(Image.open(ruta))
+                self._escudo_cache[clave] = foto
+                return foto
+            except Exception:
+                pass  # el archivo esta corrupto o similar, se vuelve a bajar
+
         self._escudo_cache[clave] = "cargando"
         threading.Thread(target=self._descargar_escudo, args=(url, tamano),
                           daemon=True).start()
@@ -603,6 +630,12 @@ class App:
             img.thumbnail((tamano, tamano), Image.LANCZOS)
             lienzo = Image.new("RGBA", (tamano, tamano), (0, 0, 0, 0))
             lienzo.paste(img, ((tamano - img.width) // 2, (tamano - img.height) // 2), img)
+
+            try:
+                lienzo.save(self._ruta_escudo_en_disco(url, tamano))
+            except Exception as e:
+                log(f"No se pudo guardar el escudo en disco (no es grave): {e}")
+
             self.root.after(0, self._guardar_escudo_descargado, url, tamano, lienzo)
         except Exception as e:
             log(f"No se pudo descargar un escudo: {e}")
@@ -690,11 +723,19 @@ class App:
         badge_fg = t["dorado"] if destacado else t["badge_hora_texto"]
         _redondear(cv, bx1, by1, bx2, by2, 10, fill=badge_bg, outline="")
         bxm = (bx1 + bx2) / 2
-        prefijo = "\u2b50 " if destacado else ""
-        cv.create_text(bxm, by1 + 16, text=f"{prefijo}{p['fecha'].strftime('%H:%M')}",
+        cv.create_text(bxm, by1 + 16, text=p["fecha"].strftime("%H:%M"),
                         font=self._f_hora, fill=badge_fg)
         cv.create_text(bxm, by1 + 34, text=p["fecha"].strftime("%d/%m"),
                         font=self._f_fecha, fill=badge_fg)
+
+        if destacado:
+            # La estrella de "destacado" va aparte, como una insignia en
+            # la esquina de toda la tarjeta -- si se mete adentro del
+            # badge de la hora, descentra la hora respecto de la fecha
+            # (una linea queda mas ancha que la otra al llevar la
+            # estrella pegada).
+            cv.create_text(6, 3, text="\u2b50", font=("Segoe UI Emoji", 9),
+                            fill=t["dorado"], anchor="nw")
 
         cv._referencias = []
         x = 104
@@ -731,7 +772,11 @@ class App:
         else:
             cv.create_text(x + 17, ym, text="\u26bd", font=("Segoe UI Emoji", 14),
                             fill=t["texto_secundario"])
-        x += 44
+        x += 40
+
+        # --- separador ---
+        cv.create_line(x, 16, x, alto_fila - 16, fill=borde)
+        x += 16
 
         # --- competicion ---
         cv.create_text(x, ym, text=p["competicion"], font=self._f_competicion,
