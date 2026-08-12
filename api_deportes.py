@@ -519,10 +519,15 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
     def _mismo_partido(a, b):
         if abs((a["fecha"] - b["fecha"]).total_seconds()) >= 3 * 3600:
             return False
-        return (
-            _mismo_equipo(a["local"], b["local"])
-            and _mismo_equipo(a["visitante"], b["visitante"])
-        )
+        # Normal: mismo local y mismo visitante. Invertido: alguna
+        # fuente (sobre todo el seguimiento por equipo de Boca y
+        # Seleccion) a veces reporta local/visitante al reves respecto
+        # a como lo trae la fuente por competicion -- si no se
+        # contempla este caso, el mismo partido queda duplicado en dos
+        # filas (una con el destacado marcado y otra sin marcar).
+        normal = _mismo_equipo(a["local"], b["local"]) and _mismo_equipo(a["visitante"], b["visitante"])
+        invertido = _mismo_equipo(a["local"], b["visitante"]) and _mismo_equipo(a["visitante"], b["local"])
+        return normal or invertido
 
     def _agregar(lista):
         for p in lista:
@@ -555,6 +560,24 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
             _agregar(_proximos_por_equipo(equipo, log))
         except Exception as e:
             log(f"[ERROR] {equipo['nombre_visible']} fallo por completo: {e}")
+
+    # El seguimiento por equipo (eventsnext.php) solo devuelve partidos
+    # que TODAVIA NO ARRANCARON -- apenas empieza (o termina) el
+    # partido, deja de aparecer ahi, y el destacado se perdia en el
+    # siguiente refresco aunque el partido siguiera en la lista por el
+    # lado de la competicion. Por eso, aparte de eso, se marca
+    # destacado directamente por nombre en TODOS los partidos ya
+    # encontrados, sin importar el estado del partido ni de que fuente
+    # haya salido.
+    for p in partidos:
+        if p.get("destacado"):
+            continue
+        for equipo in EQUIPOS_DESTACADOS:
+            if (_mismo_equipo(p["local"], equipo["nombre_visible"])
+                    or _mismo_equipo(p["visitante"], equipo["nombre_visible"])):
+                p["destacado"] = True
+                p["equipo_destacado"] = equipo["nombre_visible"]
+                break
 
     partidos.sort(key=lambda p: p["fecha"])
 
