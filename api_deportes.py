@@ -26,6 +26,16 @@ except Exception:
 TSDB_KEY = "3"  # key publica de test de TheSportsDB, no requiere registro
 BASE_URL = f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}"
 
+# Escudos que Sebi cargo a mano (equipos chicos que ninguna API tiene)
+# y subio con el "Subidor de Escudos" a esta carpeta del propio repo.
+# Se prueban como ultimo recurso, antes de rendirse e ir al icono
+# generico.
+GITHUB_OWNER = "squiven"
+GITHUB_REPO = "futbol-recordatorios-papa"
+GITHUB_BRANCH = "main"
+ESCUDOS_MANUALES_BASE = (f"https://raw.githubusercontent.com/{GITHUB_OWNER}/"
+                          f"{GITHUB_REPO}/{GITHUB_BRANCH}/escudos_manuales")
+
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 ESPN_LIGAS = {
     "liga_argentina": "arg.1",
@@ -271,6 +281,28 @@ def _escudo_wikipedia(nombre_equipo, log):
     return None
 
 
+def _escudo_manual(nombre_equipo, log):
+    """
+    Ultimo fallback antes del icono generico: escudos que Sebi cargo a
+    mano y subio a escudos_manuales/ en el repo (con el "Subidor de
+    Escudos", una herramienta aparte que corre solo en su PC). Se
+    prueba con un pedido HEAD liviano -- si el archivo esta, se usa esa
+    URL y despues, como con Wikidata/Wikipedia, queda cacheada en disco
+    para no volver a preguntar nunca mas por ese equipo.
+    """
+    if not nombre_equipo or nombre_equipo == "?":
+        return None
+    clave = clave_archivo_escudo(nombre_equipo)
+    url = f"{ESCUDOS_MANUALES_BASE}/{clave}.png"
+    try:
+        r = requests.head(url, timeout=6)
+        if r.status_code == 200:
+            return url
+    except Exception as e:
+        log(f"[AVISO] escudo manual '{nombre_equipo}': {e}")
+    return None
+
+
 PALABRAS_CLUB = ("futbol", "football", "voetbal", "fussball", "fußball", "soccer")
 
 
@@ -490,6 +522,20 @@ def _texto_normalizado(s):
     return " ".join(s.lower().strip().split())
 
 
+def clave_archivo_escudo(nombre_equipo):
+    """
+    Convierte un nombre de equipo en un nombre de archivo seguro y
+    estable: minusculas, sin acentos, sin apostrofes/puntos/simbolos,
+    espacios como '_'. La usan tanto api_deportes.py (para buscar en
+    escudos_manuales/) como subidor_escudos.py (para subir con el
+    mismo nombre) -- tiene que dar SIEMPRE el mismo resultado en los
+    dos lados para un mismo equipo.
+    """
+    base = _texto_normalizado(nombre_equipo)
+    base = "".join(c if (c.isalnum() or c == " ") else "" for c in base)
+    return "_".join(base.split())
+
+
 def _mismo_equipo(nombre_a, nombre_b):
     """
     ESPN y TheSportsDB no siempre nombran igual al mismo equipo (ej:
@@ -611,7 +657,9 @@ def _completar_escudo(escudo_actual, nombre_equipo, tsdb_id, log):
     if clave_disco in _cache_escudos_disco:
         return _cache_escudos_disco[clave_disco]
 
-    escudo_actual = _escudo_wikidata(nombre_equipo, log) or _escudo_wikipedia(nombre_equipo, log)
+    escudo_actual = (_escudo_wikidata(nombre_equipo, log)
+                      or _escudo_wikipedia(nombre_equipo, log)
+                      or _escudo_manual(nombre_equipo, log))
     if escudo_actual:
         _cache_escudos_disco[clave_disco] = escudo_actual
         _guardar_cache_escudos_disco()
