@@ -36,6 +36,26 @@ GITHUB_BRANCH = "main"
 ESCUDOS_MANUALES_BASE = (f"https://raw.githubusercontent.com/{GITHUB_OWNER}/"
                           f"{GITHUB_REPO}/{GITHUB_BRANCH}/escudos_manuales")
 
+# Mismo mecanismo que escudos_manuales/, pero para el logo de cada
+# competicion (Liga Profesional, Libertadores, etc). Se prueba solo si
+# TheSportsDB no tiene el escudo de esa liga cargado.
+LOGOS_LIGA_MANUALES_BASE = (f"https://raw.githubusercontent.com/{GITHUB_OWNER}/"
+                             f"{GITHUB_REPO}/{GITHUB_BRANCH}/logos_competiciones_manuales")
+
+# Cache separada (archivo aparte) para el canal de TV de cada partido
+# puntual -- a diferencia de los escudos (que son por equipo y no
+# cambian nunca), el canal es por PARTIDO, asi que se cachea por ID de
+# evento y solo tiene sentido mientras ese partido siga en la lista de
+# proximos partidos.
+CANALES_TV_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      "canales_tv_cache.json")
+
+# Grilla de Telecentro (nombre de canal -> numero), cargada una sola
+# vez. La arma y actualiza Sebi a mano editando canales_telecentro.json
+# en el repo -- no hay forma automatica de sacar esto de ninguna API.
+CANALES_TELECENTRO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "canales_telecentro.json")
+
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 ESPN_LIGAS = {
     "liga_argentina": "arg.1",
@@ -61,6 +81,11 @@ LIGAS = [
     {"clave": "mls", "ids": ["4346"], "nombre_visible": "MLS (Inter Miami)"},
     {"clave": "champions", "ids": ["4480"], "nombre_visible": "Champions League"},
 ]
+
+# Para poder ir del nombre visible de la competicion (el que ya trae
+# cada partido armado) a sus IDs de TheSportsDB, sin tener que guardar
+# ese ID en cada partido por separado.
+_LIGA_POR_NOMBRE = {liga["nombre_visible"]: liga for liga in LIGAS}
 
 # Equipos que se destacan sin importar la competicion (amistosos, etc
 # incluidos). A diferencia de LIGAS, aca se busca por equipo, no por
@@ -161,6 +186,49 @@ def _guardar_cache_escudos_disco():
 
 
 _cache_escudos_disco = _cargar_cache_escudos_disco()
+
+
+def _cargar_cache_canales_tv():
+    try:
+        with open(CANALES_TV_CACHE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _guardar_cache_canales_tv():
+    try:
+        with open(CANALES_TV_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(_cache_canales_tv, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+_cache_canales_tv = _cargar_cache_canales_tv()
+
+
+def _cargar_grilla_telecentro():
+    try:
+        with open(CANALES_TELECENTRO_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+_GRILLA_TELECENTRO = _cargar_grilla_telecentro()
+
+
+def _numero_telecentro(nombre_canal):
+    """Busca el numero de Telecentro para un nombre de canal, tolerando
+    variaciones chicas (mayusculas, espacios de mas, HD pegado o no)
+    contra la grilla cargada en canales_telecentro.json."""
+    if not nombre_canal:
+        return None
+    objetivo = _texto_normalizado(nombre_canal)
+    for nombre, numero in _GRILLA_TELECENTRO.items():
+        if _texto_normalizado(nombre) == objetivo:
+            return numero[0] if isinstance(numero, list) else numero
+    return None
 
 WIKIMEDIA_HEADERS = {
     # Wikidata/Wikimedia exige un User-Agent descriptivo (y a veces es
@@ -300,6 +368,26 @@ def _escudo_manual(nombre_equipo, log):
             return url
     except Exception as e:
         log(f"[AVISO] escudo manual '{nombre_equipo}': {e}")
+    return None
+
+
+def _logo_liga_manual(nombre_competicion, log):
+    """Mismo mecanismo que _escudo_manual, pero para logos de
+    competicion subidos a mano a logos_competiciones_manuales/ en el
+    repo (mismo workflow de arrastrar-y-soltar en GitHub que ya usa
+    Sebi para todo lo demas). En la practica va a hacer falta poco:
+    TheSportsDB tiene bien cargados los escudos de las competiciones
+    grandes que sigue la app."""
+    if not nombre_competicion:
+        return None
+    clave = clave_archivo_escudo(nombre_competicion)
+    url = f"{LOGOS_LIGA_MANUALES_BASE}/{clave}.png"
+    try:
+        r = requests.head(url, timeout=6)
+        if r.status_code == 200:
+            return url
+    except Exception as e:
+        log(f"[AVISO] logo de competicion manual '{nombre_competicion}': {e}")
     return None
 
 
@@ -515,6 +603,25 @@ def _proximos_por_equipo(equipo, log):
     return partidos
 
 
+def _es_equipo_destacado(nombre_equipo_partido, nombre_destacado):
+    """Comparacion ESTRICTA, solo para decidir si un partido es de Boca
+    o de la Seleccion (EQUIPOS_DESTACADOS).
+
+    A diferencia de _mismo_equipo (que se usa para unir el mismo
+    partido cuando lo reportan dos fuentes con el nombre escrito un
+    poco distinto, y ahi si tolera similitud aproximada), aca NUNCA se
+    admite un simple parecido: 'Argentinos Juniors' no tiene que poder
+    confundirse jamas con 'Boca Juniors' solo por compartir la palabra
+    'Juniors' -- eso fue exactamente el bug reportado (River vs
+    Argentinos Juniors quedo marcado como destacado). Solo cuenta
+    nombre identico, o que uno sea substring completo del otro (asi
+    'Argentina' sigue reconociendo a 'Seleccion Argentina', y 'Club
+    Atletico Boca Juniors' sigue reconociendo a 'Boca Juniors')."""
+    a = _texto_normalizado(nombre_equipo_partido)
+    b = _texto_normalizado(nombre_destacado)
+    return a == b or a in b or b in a
+
+
 def _texto_normalizado(s):
     """Minusculas, sin acentos, sin espacios de mas -- para comparar
     nombres de equipo que vienen de distintas fuentes."""
@@ -619,8 +726,8 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
         if p.get("destacado"):
             continue
         for equipo in EQUIPOS_DESTACADOS:
-            if (_mismo_equipo(p["local"], equipo["nombre_visible"])
-                    or _mismo_equipo(p["visitante"], equipo["nombre_visible"])):
+            if (_es_equipo_destacado(p["local"], equipo["nombre_visible"])
+                    or _es_equipo_destacado(p["visitante"], equipo["nombre_visible"])):
                 p["destacado"] = True
                 p["equipo_destacado"] = equipo["nombre_visible"]
                 break
@@ -640,11 +747,109 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
                                                p.get("_tsdb_id_local"), log)
         p["escudo_visitante"] = _completar_escudo(p.get("escudo_visitante"), p["visitante"],
                                                    p.get("_tsdb_id_visitante"), log)
+        p["logo_competicion"] = _completar_logo_liga(p["competicion"], log)
+        p["canal_tv"] = _completar_canal_tv(p.get("id"), log)
 
     return partidos
 
 
+def _completar_logo_liga(nombre_competicion, log):
+    """
+    Logo de la competicion (Liga Profesional, Libertadores, etc), con
+    el mismo espiritu de cache que los escudos de equipo: una vez
+    resuelto, no se vuelve a preguntar nunca mas.
+
+    Orden: cache en disco -> TheSportsDB (lookupleague.php, trae el
+    escudo de la gran mayoria de las competiciones que sigue la app)
+    -> logos_competiciones_manuales/ del repo, para el caso raro de
+    que a alguna le falte.
+    """
+    clave_disco = f"logoliga:{_texto_normalizado(nombre_competicion)}"
+    if clave_disco in _cache_escudos_disco:
+        return _cache_escudos_disco[clave_disco]
+
+    liga = _LIGA_POR_NOMBRE.get(nombre_competicion)
+    url = None
+    if liga:
+        for liga_id in liga["ids"]:
+            datos = _pedir(f"{BASE_URL}/lookupleague.php", {"id": liga_id}, log,
+                            contexto=f"logo de {nombre_competicion}")
+            ligas_data = (datos or {}).get("leagues") or []
+            if ligas_data and ligas_data[0].get("strBadge"):
+                url = ligas_data[0]["strBadge"]
+                break
+
+    if not url:
+        url = _logo_liga_manual(nombre_competicion, log)
+
+    if url:
+        _cache_escudos_disco[clave_disco] = url
+        _guardar_cache_escudos_disco()
+    return url
+
+
+def _completar_canal_tv(id_evento, log):
+    """
+    Canal que transmite ESE partido puntual (a diferencia del logo de
+    competicion, esto varia partido a partido, no se puede cachear por
+    competicion). Fuente: TheSportsDB (lookuptv.php), filtrando solo
+    canales de Argentina.
+
+    OJO: esto solo funciona para partidos cuyo ID es de TheSportsDB.
+    Los que vinieron de ESPN tienen un id con el prefijo "espn-" (ver
+    _evento_espn_a_partido) y no se pueden cruzar contra este endpoint
+    -- para esos, se devuelve None directamente sin gastar un pedido,
+    y en la interfaz van a mostrar "Buscar en internet".
+
+    Se cachea por partido en un archivo aparte (canales_tv_cache.json)
+    para no volver a preguntar en cada actualizacion del dia por el
+    mismo partido.
+    """
+    if not id_evento or str(id_evento).startswith("espn-"):
+        return None
+
+    if id_evento in _cache_canales_tv:
+        return _cache_canales_tv[id_evento]
+
+    resultado = None
+    datos = _pedir(f"{BASE_URL}/lookuptv.php", {"id": id_evento}, log,
+                    contexto=f"canal de TV del partido {id_evento}")
+    eventos_tv = (datos or {}).get("tvevent") or []
+    for ev in eventos_tv:
+        pais = _texto_normalizado(ev.get("strCountry") or "")
+        if pais != "argentina":
+            continue
+        nombre_canal = ev.get("strChannel")
+        resultado = {
+            "canal": nombre_canal,
+            "numero_telecentro": _numero_telecentro(nombre_canal),
+            "logo": ev.get("strLogo"),
+        }
+        break
+
+    _cache_canales_tv[id_evento] = resultado
+    _guardar_cache_canales_tv()
+    return resultado
+
+
 def _completar_escudo(escudo_actual, nombre_equipo, tsdb_id, log):
+    """
+    Orden de prioridad para resolver el escudo de un equipo:
+
+    1. Ya vino resuelto con el partido (ESPN/TheSportsDB lo trajeron
+       directo con el evento) -- ni se pregunta.
+    2. TheSportsDB por ID de equipo (rapido, un solo pedido).
+    3. Cache en disco por nombre (equipo ya resuelto en una corrida
+       anterior, sea cual haya sido la fuente que lo encontro).
+    4. escudos_manuales/ del repo (lo que Sebi subio a mano con el
+       Subidor de Escudos) -- se prueba ANTES que las fuentes externas
+       porque si ya esta subido a mano es la fuente mas confiable y
+       ademas la mas rapida (un solo pedido HEAD).
+    5. Wikidata / Wikipedia, como ultimo recurso -- son las que mas
+       tardan (busqueda de QID, varios pedidos), asi que dejarlas al
+       final tambien ayuda a que la lista cargue mas rapido para los
+       equipos que ya tienen escudo manual o en cache.
+    """
     if escudo_actual:
         return escudo_actual
 
@@ -657,9 +862,9 @@ def _completar_escudo(escudo_actual, nombre_equipo, tsdb_id, log):
     if clave_disco in _cache_escudos_disco:
         return _cache_escudos_disco[clave_disco]
 
-    escudo_actual = (_escudo_wikidata(nombre_equipo, log)
-                      or _escudo_wikipedia(nombre_equipo, log)
-                      or _escudo_manual(nombre_equipo, log))
+    escudo_actual = (_escudo_manual(nombre_equipo, log)
+                      or _escudo_wikidata(nombre_equipo, log)
+                      or _escudo_wikipedia(nombre_equipo, log))
     if escudo_actual:
         _cache_escudos_disco[clave_disco] = escudo_actual
         _guardar_cache_escudos_disco()
