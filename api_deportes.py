@@ -8,6 +8,7 @@ bot de Discord de Sebi para estas mismas competiciones.
 
 import json
 import os
+import re
 import time
 import unicodedata
 from datetime import datetime, timedelta
@@ -55,6 +56,26 @@ CANALES_TV_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # en el repo -- no hay forma automatica de sacar esto de ninguna API.
 CANALES_TELECENTRO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                         "canales_telecentro.json")
+
+# Canal de cada partido cargado A MANO por Sebi (con el "Subidor de
+# Escudos", mirando la agenda deportiva de Ole) para los casos donde
+# TheSportsDB no tiene el dato -- mismo espiritu que canales_telecentro.json:
+# un archivo que Sebi mantiene y sube al repo, y que le llega al papa
+# como parte de la actualizacion normal (no es dato generado en SU PC,
+# por eso no esta en el NO_TOCAR del actualizador). Provisorio hasta
+# que haya un scraper de la agenda de Ole; mientras tanto gana SIEMPRE
+# sobre el resultado automatico de TheSportsDB, porque si Sebi lo cargo
+# a mano es porque la fuente automatica no lo tenia o estaba mal.
+CANALES_MANUALES_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           "canales_manuales.json")
+
+# Logos de canal subidos a mano (mismo mecanismo que escudos_manuales/,
+# pero para el LOGO del canal en si -- ej. el isotipo de "TNT Sports" --
+# en vez de el escudo de un equipo. Se guardan por nombre de canal, no
+# por partido, porque el mismo canal transmite muchos partidos
+# distintos.
+CANALES_MANUALES_LOGOS_BASE = (f"https://raw.githubusercontent.com/{GITHUB_OWNER}/"
+                                f"{GITHUB_REPO}/{GITHUB_BRANCH}/canales_manuales_logos")
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 ESPN_LIGAS = {
@@ -216,6 +237,53 @@ def _cargar_grilla_telecentro():
 
 
 _GRILLA_TELECENTRO = _cargar_grilla_telecentro()
+
+
+def _cargar_canales_manuales():
+    try:
+        with open(CANALES_MANUALES_JSON_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+_CANALES_MANUALES = _cargar_canales_manuales()
+
+
+def clave_partido_canal(p):
+    """
+    Clave estable para identificar UN partido puntual (dia + los dos
+    equipos), usada para guardar/buscar su canal cargado a mano.
+
+    A diferencia del "id" que trae cada partido (que puede faltar, ser
+    de ESPN con el prefijo "espn-", o directamente variar de una
+    corrida a otra), esta clave sale solo de datos que no cambian para
+    ese partido: la FECHA (dia, sin la hora -- por si algun partido se
+    reprograma unas horas) y los nombres de los dos equipos ya
+    normalizados con clave_archivo_escudo (la misma funcion que separa
+    'Gimnasia La Plata' de cualquier otro Gimnasia, sin importar
+    tildes/mayusculas). Tiene que dar el MISMO resultado en
+    api_deportes.py (para buscar) y en subidor_escudos.py (para
+    guardar) -- por eso vive aca, un solo lugar.
+    """
+    dia = p["fecha"].strftime("%Y-%m-%d")
+    return f"{dia}_{clave_archivo_escudo(p['local'])}_vs_{clave_archivo_escudo(p['visitante'])}"
+
+
+def _canal_manual_logo(nombre_canal, log):
+    """Mismo mecanismo que _escudo_manual, pero para el logo de un
+    CANAL de TV subido a mano a canales_manuales_logos/ en el repo."""
+    if not nombre_canal:
+        return None
+    clave = clave_archivo_escudo(nombre_canal)
+    url = f"{CANALES_MANUALES_LOGOS_BASE}/{clave}.png"
+    try:
+        r = requests.head(url, timeout=6)
+        if r.status_code == 200:
+            return url
+    except Exception as e:
+        log(f"[AVISO] logo de canal manual '{nombre_canal}': {e}")
+    return None
 
 
 def _numero_telecentro(nombre_canal):
@@ -748,7 +816,7 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
         p["escudo_visitante"] = _completar_escudo(p.get("escudo_visitante"), p["visitante"],
                                                    p.get("_tsdb_id_visitante"), log)
         p["logo_competicion"] = _completar_logo_liga(p["competicion"], log)
-        p["canal_tv"] = _completar_canal_tv(p.get("id"), log)
+        p["canal_tv"] = _completar_canal_tv(p, log)
 
     return partidos
 
@@ -788,23 +856,179 @@ def _completar_logo_liga(nombre_competicion, log):
     return url
 
 
-def _completar_canal_tv(id_evento, log):
+OLE_AGENDA_URL = "https://www.ole.com.ar/agenda-deportiva"
+
+# Agenda completa de Ole (varios dias para adelante, no solo hoy),
+# parseada de una sola vez y cacheada un rato -- ver _agenda_ole_canales.
+_AGENDA_OLE_CACHE = {"datos": {}, "timestamp": 0.0}
+_AGENDA_OLE_TTL_SEGUNDOS = 30 * 60
+
+
+def _equipos_desde_evento_ole(ev):
+    """
+    Nombre de los dos equipos de un evento de la agenda de Ole.
+    Primero se intenta con 'related.mams[].value.teams' (datos ya
+    separados y prolijos, vienen de Opta) porque son mas confiables
+    que partir el titulo a mano; si el evento todavia no tiene eso
+    cargado (partidos lejanos en el tiempo), se cae al titulo del
+    evento tipo 'Equipo1 vs Equipo2 ' y se parte por ' vs '.
+    """
+    for m in (ev.get("related") or {}).get("mams") or []:
+        equipos = (m.get("value") or {}).get("teams")
+        if equipos:
+            local = (equipos.get("home") or {}).get("name")
+            visitante = (equipos.get("away") or {}).get("name")
+            if local and visitante:
+                return local, visitante
+
+    titulo = ev.get("eventTitle") or ev.get("title") or ""
+    partes = titulo.split(" vs ")
+    if len(partes) == 2:
+        return partes[0].strip(), partes[1].strip()
+    return None, None
+
+
+def _fecha_argentina_desde_iso(iso_utc):
+    """El 'startDate' que trae Ole viene en UTC ('...Z'); esto lo
+    convierte al DIA en horario argentino (UTC-3), que es lo que
+    necesita clave_partido_canal para que coincida con la fecha local
+    que ya trae cada partido de la agenda de tu papa."""
+    if not iso_utc:
+        return None
+    for formato in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            dt_utc = datetime.strptime(iso_utc, formato)
+            break
+        except ValueError:
+            dt_utc = None
+    if dt_utc is None:
+        return None
+    return (dt_utc - timedelta(hours=3)).strftime("%Y-%m-%d")
+
+
+def _obtener_agenda_ole(log):
+    """
+    Trae la Agenda Deportiva de Ole (ole.com.ar/agenda-deportiva) y
+    arma un diccionario { clave_partido_canal(): "Nombre del canal" }.
+
+    A diferencia de scrapear el HTML visible, esto lee directo el JSON
+    que Next.js deja embebido en la pagina (el script
+    '__NEXT_DATA__' -> props.pageProps.content), que ya trae cada
+    partido con sus equipos separados y su/sus canal/es asignado/s --
+    mucho mas estable que parsear divs y clases de CSS que cambian
+    cada vez que rediseñan la pagina.
+
+    Un solo pedido cubre varios dias para adelante (Ole publica la
+    agenda completa, no solo la de hoy), por eso se puede cachear un
+    rato largo (ver _AGENDA_OLE_TTL_SEGUNDOS) sin perderse partidos.
+    """
+    resultado = {}
+    r = requests.get(OLE_AGENDA_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    r.raise_for_status()
+
+    m = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        r.text, re.S)
+    if not m:
+        log("[AVISO] no se encontro __NEXT_DATA__ en la agenda de Ole "
+            "(puede que hayan cambiado la pagina)")
+        return resultado
+
+    datos = json.loads(m.group(1))
+    eventos = (((datos.get("props") or {}).get("pageProps") or {})
+               .get("content") or [])
+
+    for ev in eventos:
+        if ev.get("type") != "event":
+            continue
+        # Solo nos interesa futbol -- Ole mezcla en la misma lista
+        # tenis, formula 1, boxeo, etc, que no tienen "local"/"visitante"
+        # en el sentido que usa esta app.
+        secciones = ev.get("sections") or []
+        es_futbol = any("futbol" in (s.get("url") or "").lower() for s in secciones)
+        if not es_futbol:
+            continue
+
+        canales = ev.get("tagsChannel") or []
+        if not canales:
+            continue
+
+        local, visitante = _equipos_desde_evento_ole(ev)
+        if not local or not visitante:
+            continue
+
+        fecha = _fecha_argentina_desde_iso(ev.get("startDate"))
+        if not fecha:
+            continue
+
+        clave = f"{fecha}_{clave_archivo_escudo(local)}_vs_{clave_archivo_escudo(visitante)}"
+        # Si el partido tiene mas de un canal (ej. "ESPN" + "Disney +
+        # Premium"), se guarda el primero -- en todo lo visto Ole
+        # siempre lista primero el canal principal.
+        resultado[clave] = (canales[0].get("name") or "").strip()
+
+    return resultado
+
+
+def _agenda_ole_canales(log):
+    """Devuelve la agenda de Ole ya parseada, refrescandola sola cada
+    _AGENDA_OLE_TTL_SEGUNDOS. Si el pedido falla (sin internet, Ole
+    caido, cambiaron la pagina), se loguea el aviso y se sigue
+    usando lo que haya en cache (aunque este vencido) en vez de
+    romper la carga de partidos del dia."""
+    ahora = time.time()
+    if ahora - _AGENDA_OLE_CACHE["timestamp"] > _AGENDA_OLE_TTL_SEGUNDOS:
+        try:
+            _AGENDA_OLE_CACHE["datos"] = _obtener_agenda_ole(log)
+            _AGENDA_OLE_CACHE["timestamp"] = ahora
+        except Exception as e:
+            log(f"[AVISO] no se pudo traer la agenda de Ole: {e}")
+    return _AGENDA_OLE_CACHE["datos"]
+
+
+def _completar_canal_tv(p, log):
     """
     Canal que transmite ESE partido puntual (a diferencia del logo de
     competicion, esto varia partido a partido, no se puede cachear por
-    competicion). Fuente: TheSportsDB (lookuptv.php), filtrando solo
-    canales de Argentina.
+    competicion).
 
-    OJO: esto solo funciona para partidos cuyo ID es de TheSportsDB.
-    Los que vinieron de ESPN tienen un id con el prefijo "espn-" (ver
-    _evento_espn_a_partido) y no se pueden cruzar contra este endpoint
-    -- para esos, se devuelve None directamente sin gastar un pedido,
-    y en la interfaz van a mostrar "Buscar en internet".
+    Orden:
+    1. Canal cargado A MANO por Sebi en canales_manuales.json -- gana
+       siempre que exista, es una correccion deliberada (para los
+       pocos casos donde ni Ole ni TheSportsDB tienen el dato, o lo
+       tienen mal).
+    2. Agenda Deportiva de Ole (ver _agenda_ole_canales) -- fuente
+       automatica principal, cubre practicamente todo el futbol
+       argentino e internacional relevante.
+    3. TheSportsDB (lookuptv.php), filtrando solo canales de Argentina
+       -- respaldo para cuando Ole todavia no cargo el canal de un
+       partido, o para partidos que Ole no tiene en su agenda. OJO:
+       esto solo funciona para partidos cuyo ID es de TheSportsDB; los
+       que vinieron de ESPN (prefijo "espn-") no se pueden cruzar
+       contra este endpoint.
 
-    Se cachea por partido en un archivo aparte (canales_tv_cache.json)
-    para no volver a preguntar en cada actualizacion del dia por el
-    mismo partido.
+    Si ninguna de las tres tiene nada, se devuelve None y en la
+    interfaz del papa va a mostrar "Buscar en internet".
     """
+    clave = clave_partido_canal(p)
+
+    canal_manual = _CANALES_MANUALES.get(clave)
+    if canal_manual:
+        return {
+            "canal": canal_manual,
+            "numero_telecentro": _numero_telecentro(canal_manual),
+            "logo": _canal_manual_logo(canal_manual, log),
+        }
+
+    canal_ole = _agenda_ole_canales(log).get(clave)
+    if canal_ole:
+        return {
+            "canal": canal_ole,
+            "numero_telecentro": _numero_telecentro(canal_ole),
+            "logo": _canal_manual_logo(canal_ole, log),
+        }
+
+    id_evento = p.get("id")
     if not id_evento or str(id_evento).startswith("espn-"):
         return None
 
