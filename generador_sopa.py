@@ -93,7 +93,64 @@ BANCO_DE_PALABRAS = [
     "TREN", "AVION", "BARCO", "CAMINO", "CIUDAD", "PUEBLO", "PLAZA",
     "MERCADO", "TIENDA", "DINERO", "REGALO", "FIESTA", "CUMPLEANIOS",
     "NAVIDAD", "AMISTAD", "ALEGRIA", "SONRISA", "ABRAZO", "CARINIO",
+    # Colores
+    "ROJO", "AZUL", "VERDE", "AMARILLO", "NARANJA", "VIOLETA", "ROSA",
+    "MARRON", "GRIS", "NEGRO", "BLANCO", "CELESTE", "DORADO", "PLATEADO",
+    "TURQUESA", "BEIGE", "BORDO", "FUCSIA",
+    # Cuerpo humano
+    "CABEZA", "PELO", "OJO", "OREJA", "NARIZ", "BOCA", "DIENTE", "CUELLO",
+    "HOMBRO", "BRAZO", "CODO", "MANO", "DEDO", "PECHO", "ESPALDA",
+    "PANZA", "CINTURA", "PIERNA", "RODILLA", "TOBILLO", "PIE", "CORAZON",
+    "PULMON", "CEREBRO", "PIEL", "UNIA", "CEJA", "PESTANIA", "MEJILLA",
+    "MENTON", "MUNIECA",
+    # Ropa y vestimenta
+    "CAMISA", "REMERA", "PANTALON", "SHORT", "PULOVER", "CAMPERA",
+    "ABRIGO", "BUFANDA", "GORRO", "GORRA", "SOMBRERO", "GUANTE",
+    "MEDIA", "ZAPATO", "ZAPATILLA", "SANDALIA", "CINTURON", "CORBATA",
+    "VESTIDO", "POLLERA", "TRAJE", "PIJAMA", "BOLSILLO", "BOTON",
+    "CIERRE", "MOCHILA", "CARTERA", "BILLETERA", "ANTEOJO", "PARAGUAS",
+    # Herramientas y oficios
+    "MARTILLO", "DESTORNILLADOR", "TENAZA", "SIERRA", "TALADRO",
+    "CLAVO", "TORNILLO", "ESCALERA", "PINTOR", "ALBANIL", "PLOMERO",
+    "ELECTRICISTA", "CARPINTERO", "MECANICO", "JARDINERO", "PANADERO",
+    "ZAPATERO", "SASTRE", "PELUQUERO", "ABOGADO", "INGENIERO",
+    "ARQUITECTO", "PERIODISTA", "CHOFER", "GUARDIA", "VENDEDOR",
+    # Transporte
+    "COLECTIVO", "SUBTE", "TAXI", "CAMION", "MOTO", "HELICOPTERO",
+    "COHETE", "SUBMARINO", "CANOA", "VELERO", "CARRETA", "TRINEO",
+    "MONOPATIN", "PATINETA",
+    # Tecnologia
+    "COMPUTADORA", "CELULAR", "TABLET", "TECLADO", "PANTALLA", "MOUSE",
+    "IMPRESORA", "CAMARA", "AURICULAR", "PARLANTE", "CARGADOR", "CABLE",
+    "INTERNET", "APLICACION", "VIDEOJUEGO", "ROBOT", "SATELITE",
+    "ANTENA", "BATERIA", "PROGRAMA",
+    # Geografia del mundo
+    "AMERICA", "EUROPA", "AFRICA", "ASIA", "OCEANIA", "BRASIL", "CHILE",
+    "URUGUAY", "PARAGUAY", "PERU", "COLOMBIA", "MEXICO", "ESPANIA",
+    "FRANCIA", "ITALIA", "ALEMANIA", "JAPON", "CHINA", "EGIPTO",
+    "CONTINENTE", "OCEANO", "DESIERTO", "GLACIAR", "CATARATA",
+    "CORDILLERA", "VALLE", "ANDES",
+    # Plantas y jardin
+    "ROSA", "MARGARITA", "GIRASOL", "CACTUS", "HELECHO", "PASTO",
+    "RAIZ", "TALLO", "RAMA", "FRUTA", "VERDURA", "COSECHA", "SIEMBRA",
+    "INVERNADERO", "MACETERO", "REGADERA",
+    # Sentimientos y estados
+    "AMOR", "FELICIDAD", "TRISTEZA", "ENOJO", "MIEDO", "SORPRESA",
+    "CALMA", "PACIENCIA", "CORAJE", "ESPERANZA", "GRATITUD", "ORGULLO",
+    "TERNURA", "CONFIANZA", "NOSTALGIA", "ENTUSIASMO",
+    # Escuela y aprendizaje
+    "CUADERNO", "MOCHILA", "MAPA", "GLOBO", "PIZARRON", "TIZA",
+    "REGLA", "GOMA", "CARTUCHERA", "BIBLIOTECA", "AULA", "RECREO",
+    "EXAMEN", "TAREA", "LECTURA", "ESCRITURA", "NUMERO", "LETRA",
+    "IDIOMA", "HISTORIA", "GEOGRAFIA", "CIENCIA", "MATEMATICA",
 ]
+
+# Palabras duplicadas que quedaron de antes de esta ampliacion (TRIBUNA,
+# TIGRE, ROSA -- esta ultima aparece en Colores y en Plantas, queda
+# bien en las dos asi que se saca solo la copia de mas) se limpian
+# ACA, en un solo lugar, en vez de tener que revisar a mano cada
+# categoria de arriba cada vez que se agrega una palabra nueva.
+BANCO_DE_PALABRAS = list(dict.fromkeys(BANCO_DE_PALABRAS))
 
 # El generador de letras de relleno usa el abecedario en espanol
 # (incluye Ñ) con una frecuencia aproximada a como se usan de verdad
