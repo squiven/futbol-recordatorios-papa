@@ -195,7 +195,7 @@ class PanelTimer:
         for iid in (self._id_boton_parar_rect, self._id_boton_parar_icono,
                     self._id_boton_parar_texto, self._id_boton_parar_sub):
             cv.addtag_withtag(tag_parar, iid)
-        cv.tag_bind(tag_parar, "<Button-1>", lambda e: self.cancelar())
+        cv.tag_bind(tag_parar, "<Button-1>", lambda e: self._confirmar_y_cancelar())
 
         # --- columna central: reloj ---
         centro_x = W / 2
@@ -254,7 +254,7 @@ class PanelTimer:
         y parar, en vez de los dos botones separados del modo
         grande)."""
         if self.timer_activo:
-            self.cancelar()
+            self._confirmar_y_cancelar()
         else:
             self.iniciar()
 
@@ -338,6 +338,28 @@ class PanelTimer:
         log("Temporizador de 2 horas iniciado (llamado a comer).")
         self._tick()
 
+    def _confirmar_y_cancelar(self):
+        """Antes de cancelar de una, pide confirmacion -- un misclick
+        en cualquiera de los dos botones (el grande PARAR TIEMPO o el
+        compacto haciendo de alternar) tiraba abajo sin avisar las 2
+        horas ya contadas. El popup en si vive en App (self.app), no
+        aca, para reusar el mismo estilo que los demas avisos
+        (_popup_aviso, _mostrar_alerta_partido) -- ver
+        App._confirmar_cancelar_timer.
+
+        Se dispara con root.after(0, ...) en vez de llamarlo directo:
+        este metodo corre DENTRO del propio evento de click del
+        Canvas (el tag_bind de "boton_parar"), y crear+dibujar un
+        Toplevel con Canvas nuevo (con texto) en esa misma pasada del
+        evento a veces no terminaba de pintarse en Windows -- quedaban
+        los botones del popup sin texto hasta que algo forzaba un
+        redibujado. Mismo motivo por el que _avisar_partido (app.py)
+        ya usaba root.after(0, ...) para mostrar SU alerta en vez de
+        llamarla directo desde el hilo de fondo."""
+        if not self.timer_activo:
+            return
+        self.app.root.after(0, self.app._confirmar_cancelar_timer, self.cancelar)
+
     def cancelar(self):
         if not self.timer_activo:
             return
@@ -385,6 +407,8 @@ class PanelTimer:
                                  timeout=30)
         except Exception as e:
             log(f"No se pudo mandar notificacion: {e}")
+        self.app._notificar_ntfy("Es hora de medirse",
+                                  "Pasaron las 2 horas de la comida.")
 
         if winsound:
             try:
