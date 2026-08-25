@@ -713,9 +713,22 @@ class App:
         cuerpo.bind("<Configure>", _centrar_cuerpo)
 
         def _rueda_vertical(evento):
+            # Si todo el contenido ya entra en el alto visible, no hay
+            # nada para scrollear -- antes igual se desplazaba (se
+            # corria el tablero centrado para arriba/abajo sin sentido
+            # porque el scrollregion incluye el hueco usado para
+            # centrarlo). Se compara contra el bbox real en vez de
+            # contra el scrollregion guardado, que puede haber quedado
+            # viejo.
+            bbox = canvas_scroll.bbox("all")
+            if not bbox or (bbox[3] - bbox[1]) <= canvas_scroll.winfo_height():
+                return
             canvas_scroll.yview_scroll(int(-1 * (evento.delta / 120)), "units")
 
         def _rueda_horizontal(evento):
+            bbox = canvas_scroll.bbox("all")
+            if not bbox or (bbox[2] - bbox[0]) <= canvas_scroll.winfo_width():
+                return
             canvas_scroll.xview_scroll(int(-1 * (evento.delta / 120)), "units")
 
         # El mouse sobre la grilla scrollea vertical (rueda normal) u
@@ -800,6 +813,9 @@ class App:
                          lambda ev: canvas_pal.itemconfig(id_ventana_pal, width=ev.width))
 
         def _rueda_palabras(evento):
+            bbox = canvas_pal.bbox("all")
+            if not bbox or (bbox[3] - bbox[1]) <= canvas_pal.winfo_height():
+                return
             canvas_pal.yview_scroll(int(-1 * (evento.delta / 120)), "units")
 
         canvas_pal.bind("<Enter>", lambda ev: canvas_pal.bind_all("<MouseWheel>", _rueda_palabras))
@@ -1180,9 +1196,30 @@ class App:
         )
 
         def _rueda(evento):
+            # Mismo chequeo que en la Sopa: si toda la lista de
+            # partidos de hoy ya entra en el alto visible (pocos
+            # partidos, o ventana grande), no hay nada para
+            # scrollear -- antes igual se desplazaba la lista aunque
+            # no hubiera mas para ver.
+            bbox = canvas_scroll.bbox("all")
+            if not bbox or (bbox[3] - bbox[1]) <= canvas_scroll.winfo_height():
+                return
             canvas_scroll.yview_scroll(int(-1 * (evento.delta / 120)), "units")
 
-        canvas_scroll.bind_all("<MouseWheel>", _rueda)
+        # La rueda del mouse solo scrollea la lista mientras el cursor
+        # esta arriba de ella (se ata/desata en Enter/Leave, igual que
+        # en la Sopa) -- antes se ataba una sola vez con bind_all y
+        # quedaba escuchando para siempre, incluso scrolleando en
+        # otras partes de la ventana, y hasta despues de que esta
+        # vista se destruyera al pasar a Sopa/Solitario.
+        def _activar_rueda_partidos(_ev=None):
+            canvas_scroll.bind_all("<MouseWheel>", _rueda)
+
+        def _desactivar_rueda_partidos(_ev=None):
+            canvas_scroll.unbind_all("<MouseWheel>")
+
+        canvas_scroll.bind("<Enter>", _activar_rueda_partidos)
+        canvas_scroll.bind("<Leave>", _desactivar_rueda_partidos)
 
         canvas_scroll.pack(side="left", fill="both", expand=True, padx=8, pady=8)
         scrollbar.pack(side="right", fill="y")
@@ -1299,6 +1336,89 @@ class App:
                  font=("Segoe UI", 9), bg="white", fg="#888").pack(pady=(0, 14))
 
         ventana.lift()
+        ventana.focus_force()
+
+    def _confirmar_cancelar_timer(self, al_confirmar):
+        """Popup de confirmacion antes de cancelar el temporizador a
+        mano -- lo dispara PanelTimer._confirmar_y_cancelar() cuando
+        se clickea PARAR TIEMPO (o el boton compacto estando activo),
+        para que un misclick no tire abajo sin avisar las 2 horas ya
+        contadas. Mismo estilo que los demas popups (_popup_aviso,
+        _mostrar_alerta_partido): Toplevel propio, tema actual,
+        botones dibujados en Canvas con esquinas redondeadas.
+        al_confirmar: la funcion a llamar si se confirma (siempre
+        PanelTimer.cancelar, pasada asi para no acoplar este popup a
+        un unico PanelTimer)."""
+        t = self.tema
+        ventana = tk.Toplevel(self.root)
+        ventana.title("Confirmar")
+        ventana.configure(bg=t["ventana_bg"])
+        ventana.resizable(False, False)
+        ventana.attributes("-topmost", True)
+        ventana.transient(self.root)
+        try:
+            ventana.iconbitmap(ICONO_PATH)
+        except Exception:
+            pass
+
+        ancho, alto = 420, 250
+        ventana.update_idletasks()
+        x = (ventana.winfo_screenwidth() - ancho) // 2
+        y = (ventana.winfo_screenheight() - alto) // 2
+        ventana.geometry(f"{ancho}x{alto}+{x}+{y}")
+
+        contenido = tk.Frame(ventana, bg=t["ventana_bg"])
+        contenido.pack(fill="both", expand=True, padx=28, pady=24)
+
+        tk.Label(contenido, text="\u26a0\ufe0f", font=("Segoe UI Emoji", 30),
+                 bg=t["ventana_bg"], fg=t["rojo"]).pack(pady=(0, 6))
+        tk.Label(contenido, text="\u00bfSeguro que quer\u00e9s cancelar\nel temporizador?",
+                 font=_fuente(15, "bold"), bg=t["ventana_bg"], fg=t["texto_primario"],
+                 justify="center").pack()
+        tk.Label(contenido, text="Puede haber sido un click sin querer.\n"
+                                  "Si cancel\u00e1s, se pierde el tiempo ya contado.",
+                 font=("Segoe UI", 10), bg=t["ventana_bg"], fg=t["texto_secundario"],
+                 wraplength=360, justify="center").pack(pady=(8, 18))
+
+        frame_botones = tk.Frame(contenido, bg=t["ventana_bg"])
+        frame_botones.pack(fill="x")
+
+        def _confirmar():
+            ventana.destroy()
+            al_confirmar()
+
+        cv_no = tk.Canvas(frame_botones, width=168, height=48, bg=t["ventana_bg"],
+                           highlightthickness=0)
+        cv_no.pack(side="left")
+        r_no = _redondear(cv_no, 0, 0, 168, 48, 12, fill=t["gris_deshabilitado"], outline="")
+        txt_no = cv_no.create_text(84, 24, text="NO, SEGUIR", font=_fuente(11, "bold"),
+                                    fill="white")
+        for iid in (r_no, txt_no):
+            cv_no.tag_bind(iid, "<Button-1>", lambda e: ventana.destroy())
+        cv_no.tag_bind(r_no, "<Enter>", lambda e: cv_no.config(cursor="hand2"))
+
+        cv_si = tk.Canvas(frame_botones, width=168, height=48, bg=t["ventana_bg"],
+                           highlightthickness=0)
+        cv_si.pack(side="right")
+        r_si = _redondear(cv_si, 0, 0, 168, 48, 12, fill=t["rojo"], outline="")
+        txt_si = cv_si.create_text(84, 24, text="S\u00cd, CANCELAR", font=_fuente(11, "bold"),
+                                    fill="white")
+        for iid in (r_si, txt_si):
+            cv_si.tag_bind(iid, "<Button-1>", lambda e: _confirmar())
+        cv_si.tag_bind(r_si, "<Enter>", lambda e: cv_si.config(cursor="hand2"))
+
+        # Se puede cerrar con la X sin que eso cierre el programa
+        # entero (Toplevel aparte) -- cerrar con la X equivale a "NO,
+        # SEGUIR" (no cancela el temporizador).
+        ventana.protocol("WM_DELETE_WINDOW", ventana.destroy)
+        # Fuerza a que Tkinter termine de pintar TODO (texto de los
+        # botones incluido) antes de agarrar el foco modal -- sin esto
+        # el grab_set()/focus_force() pueden disparar el foco modal
+        # una fracción de segundo antes de que el Canvas termine su
+        # primer dibujado en Windows, dejando los botones sin texto
+        # hasta que algo mas forzara un redibujado.
+        ventana.update_idletasks()
+        ventana.grab_set()
         ventana.focus_force()
 
     # ---------------- ESCUDOS ----------------
@@ -1579,7 +1699,10 @@ class App:
         linea_h_canal = self._f_canal_numero.metrics("linespace")
         lineas_comp = 1 if ancho_bloque_comp <= ancho_col else 2
         lineas_canal = 1 if ancho_bloque_canal <= ancho_col else 2
-        gap_central = 6
+        # Separacion entre el bloque de arriba (competicion) y el de
+        # abajo (canal) -- quedaba muy pegado con 6px, Sebi pidio mas
+        # aire entre los dos.
+        gap_central = 16
         alto_bloque = linea_h_comp * lineas_comp + gap_central + linea_h_canal * lineas_canal
         ym_col = alto_fila / 2
         y_arriba = max(10, ym_col - alto_bloque / 2)
@@ -1625,6 +1748,43 @@ class App:
             cv.tag_bind(id_link, "<Enter>", lambda e: cv.config(cursor="hand2"))
             cv.tag_bind(id_link, "<Leave>", lambda e: cv.config(cursor=""))
 
+    def _notificar_ntfy(self, titulo, mensaje):
+        """
+        Ademas del aviso de escritorio de Windows (que se puede pasar
+        facil por alto si la ventana esta minimizada), manda un push
+        via ntfy (https://ntfy.sh) a un topic configurable. Si en el
+        celular emparejado con la smart band (Mi Band 5 u otra) esta
+        instalada la app "ntfy" y suscripta a ese mismo topic, y el
+        celular tiene habilitado que las notificaciones de esa app se
+        reflejen en la banda (asi funciona Mi Fit/Zepp con cualquier
+        notificacion de Android), el aviso tambien va a vibrar/sonar
+        ahi -- se usan para esto: "Es hora de medirse" (PanelTimer) y
+        los avisos de partido de Boca (_avisar_partido).
+
+        Se activa SOLO si hay un topic cargado en config.json, con la
+        clave "ntfy_topic" (ej: "papa-recordatorios-x7f2k" -- que sea
+        un nombre raro/dificil de adivinar, porque cualquiera que
+        conozca el topic puede mandarte notificaciones a vos, ntfy.sh
+        publico no tiene contraseña por topic). Si no esta cargada esa
+        clave, esta funcion no hace nada -- no manda pedidos de mas
+        a un servidor externo sin que Sebi lo haya pedido antes.
+        Opcionalmente tambien se puede cargar "ntfy_servidor" para
+        usar un servidor propio en vez de ntfy.sh.
+        """
+        topic = (self.config.get("ntfy_topic") or "").strip()
+        if not topic:
+            return
+        servidor = (self.config.get("ntfy_servidor") or "https://ntfy.sh").rstrip("/")
+        try:
+            requests.post(servidor + "/", json={
+                "topic": topic,
+                "title": titulo,
+                "message": mensaje,
+                "priority": 5,
+            }, timeout=8)
+        except Exception as e:
+            log(f"No se pudo mandar la notificacion a ntfy: {e}")
+
     def _buscar_partido_en_internet(self, p):
         consulta = f"{p['local']} vs {p['visitante']} donde ver por tv"
         url = "https://www.google.com/search?q=" + urllib.parse.quote(consulta)
@@ -1663,6 +1823,7 @@ class App:
             notification.notify(title=titulo, message=mensaje, timeout=30)
         except Exception as e:
             log(f"No se pudo notificar partido: {e}")
+        self._notificar_ntfy(titulo, mensaje)
 
         # Ademas del aviso de Windows (que se puede pasar facil por
         # alto), se muestra una alerta grande adentro de la propia
