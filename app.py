@@ -25,6 +25,7 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk
+from tkinter import messagebox
 
 try:
     import winsound
@@ -382,6 +383,16 @@ class App:
             bg=t["card_bg"], fg=t["texto_primario"], padx=14, pady=6, cursor="hand2")
         self.boton_tema.pack(side="right")
         self.boton_tema.bind("<Button-1>", lambda e: self._alternar_tema_manual())
+
+        # --- boton "probar notificacion" (campanita), tambien a la
+        # derecha -- para confirmar que ntfy/la pulsera funcionan sin
+        # tener que esperar a un partido de verdad o a que termine el
+        # temporizador. Ver App._probar_notificacion_ntfy.
+        self.boton_probar_ntfy = tk.Label(
+            interior, text="\U0001F514", font=("Segoe UI Emoji", 14),
+            bg=t["card_bg"], fg=t["texto_primario"], padx=14, pady=6, cursor="hand2")
+        self.boton_probar_ntfy.pack(side="right", padx=(0, 8))
+        self.boton_probar_ntfy.bind("<Button-1>", lambda e: self._probar_notificacion_ntfy())
 
         # --- tamano de letra, tambien a la derecha (Etapa 3) ---
         # Dos botones simples, A- / A+, para que el tamano de letra de
@@ -1344,8 +1355,19 @@ class App:
         se clickea PARAR TIEMPO (o el boton compacto estando activo),
         para que un misclick no tire abajo sin avisar las 2 horas ya
         contadas. Mismo estilo que los demas popups (_popup_aviso,
-        _mostrar_alerta_partido): Toplevel propio, tema actual,
-        botones dibujados en Canvas con esquinas redondeadas.
+        _mostrar_alerta_partido): Toplevel propio, tema actual.
+
+        Los BOTONES son tk.Button (nativos de Windows) y no Canvas
+        dibujado a mano como el resto de los botones de la app -- se
+        probo primero con Canvas + create_text (mismo patron que
+        PARAR TIEMPO, que sí se ve bien) y en la practica, en Windows,
+        el texto de esos botones no llegaba a pintarse dentro de este
+        Toplevel nuevo (quedaban en blanco) aunque el resto del popup
+        -- que son tk.Label, no Canvas -- se veia perfecto. Un boton
+        nativo no tiene ese problema de timing de pintado porque lo
+        dibuja Windows mismo, no Tkinter a mano; se pierden las
+        esquinas redondeadas de los demas botones de la app, pero acá
+        priorizamos que el texto SIEMPRE se vea.
         al_confirmar: la funcion a llamar si se confirma (siempre
         PanelTimer.cancelar, pasada asi para no acoplar este popup a
         un unico PanelTimer)."""
@@ -1361,7 +1383,7 @@ class App:
         except Exception:
             pass
 
-        ancho, alto = 420, 250
+        ancho, alto = 420, 260
         ventana.update_idletasks()
         x = (ventana.winfo_screenwidth() - ancho) // 2
         y = (ventana.winfo_screenheight() - alto) // 2
@@ -1387,39 +1409,51 @@ class App:
             ventana.destroy()
             al_confirmar()
 
-        cv_no = tk.Canvas(frame_botones, width=168, height=48, bg=t["ventana_bg"],
-                           highlightthickness=0)
-        cv_no.pack(side="left")
-        r_no = _redondear(cv_no, 0, 0, 168, 48, 12, fill=t["gris_deshabilitado"], outline="")
-        txt_no = cv_no.create_text(84, 24, text="NO, SEGUIR", font=_fuente(11, "bold"),
-                                    fill="white")
-        for iid in (r_no, txt_no):
-            cv_no.tag_bind(iid, "<Button-1>", lambda e: ventana.destroy())
-        cv_no.tag_bind(r_no, "<Enter>", lambda e: cv_no.config(cursor="hand2"))
+        fuente_boton = _fuente(11, "bold")
 
-        cv_si = tk.Canvas(frame_botones, width=168, height=48, bg=t["ventana_bg"],
-                           highlightthickness=0)
-        cv_si.pack(side="right")
-        r_si = _redondear(cv_si, 0, 0, 168, 48, 12, fill=t["rojo"], outline="")
-        txt_si = cv_si.create_text(84, 24, text="S\u00cd, CANCELAR", font=_fuente(11, "bold"),
-                                    fill="white")
-        for iid in (r_si, txt_si):
-            cv_si.tag_bind(iid, "<Button-1>", lambda e: _confirmar())
-        cv_si.tag_bind(r_si, "<Enter>", lambda e: cv_si.config(cursor="hand2"))
+        btn_no = tk.Button(
+            frame_botones, text="NO, SEGUIR", font=fuente_boton,
+            bg=t["gris_deshabilitado"], fg="white",
+            activebackground=t["gris_deshabilitado"], activeforeground="white",
+            relief="flat", bd=0, padx=18, pady=14, cursor="hand2",
+            command=ventana.destroy)
+        btn_no.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        btn_si = tk.Button(
+            frame_botones, text="S\u00cd, CANCELAR", font=fuente_boton,
+            bg=t["rojo"], fg="white",
+            activebackground=t["rojo"], activeforeground="white",
+            relief="flat", bd=0, padx=18, pady=14, cursor="hand2",
+            command=_confirmar)
+        btn_si.pack(side="right", fill="x", expand=True, padx=(6, 0))
 
         # Se puede cerrar con la X sin que eso cierre el programa
         # entero (Toplevel aparte) -- cerrar con la X equivale a "NO,
         # SEGUIR" (no cancela el temporizador).
         ventana.protocol("WM_DELETE_WINDOW", ventana.destroy)
-        # Fuerza a que Tkinter termine de pintar TODO (texto de los
-        # botones incluido) antes de agarrar el foco modal -- sin esto
-        # el grab_set()/focus_force() pueden disparar el foco modal
-        # una fracción de segundo antes de que el Canvas termine su
-        # primer dibujado en Windows, dejando los botones sin texto
-        # hasta que algo mas forzara un redibujado.
         ventana.update_idletasks()
         ventana.grab_set()
         ventana.focus_force()
+
+    def _probar_notificacion_ntfy(self):
+        """Boton de prueba (header) para confirmar de una que la
+        notificacion le llega a la pulsera, sin tener que esperar a
+        que termine el temporizador o arranque un partido de Boca de
+        verdad. Manda exactamente el mismo tipo de push que usan
+        _avisar_partido y PanelTimer._finalizar, asi que si esta
+        prueba suena, las de verdad tambien van a sonar."""
+        if not (self.config.get("ntfy_topic") or "").strip():
+            messagebox.showinfo(
+                "Notificaciones",
+                "Todavia no cargaste un \"ntfy_topic\" en config.json, asi "
+                "que no hay a donde mandar la prueba. Agregalo primero y "
+                "reiniciá el programa.")
+            return
+        self._notificar_ntfy("\U0001F514 Prueba de notificaci\u00f3n",
+                              "Si esto son\u00f3/vibr\u00f3 en el celu (y en la "
+                              "pulsera), la notificaci\u00f3n funciona bien.")
+        messagebox.showinfo("Notificaciones", "Prueba enviada. Revis\u00e1 el celu "
+                             "(y la pulsera) en unos segundos.")
 
     # ---------------- ESCUDOS ----------------
     def _ruta_escudo_en_disco(self, url, tamano):
