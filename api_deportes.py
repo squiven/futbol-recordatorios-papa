@@ -91,12 +91,23 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 ESCUDOS_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "escudos_cache.json")
 
+# Partidos de HOY ya armados y completos (con escudo, logo de
+# competicion y canal ya resueltos), guardados en disco y pisados
+# enteros cada vez que se llama a obtener_proximos_partidos. Pensado
+# para cuando la PC se apaga un rato y se vuelve a prender el mismo
+# dia: en vez de rehacer toda la busqueda pesada por ESPN/TheSportsDB/
+# Ole de nuevo, se reusa esta lista y solo se reintenta completar lo
+# que todavia falte (ver obtener_proximos_partidos). Si el archivo es
+# de otro dia, se descarta entero.
+PARTIDOS_HOY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "partidos_hoy.json")
+
 # IDs de TheSportsDB para las competiciones que le interesan a papa.
 # Son los mismos IDs que ya estan probados y funcionando en el bot de
 # Discord (burdel-bot), asi que no dependen de una busqueda ambigua.
 LIGAS = [
     {"clave": "liga_argentina", "ids": ["4406", "5342"], "nombre_visible": "Liga Profesional Argentina"},
-    {"clave": "copa_argentina", "ids": ["4960"], "nombre_visible": "Copa Argentina"},
+    {"clave": "copa_argentina", "ids": ["4500"], "nombre_visible": "Copa Argentina"},
     {"clave": "libertadores", "ids": ["4144"], "nombre_visible": "Copa Libertadores"},
     {"clave": "sudamericana", "ids": ["4145"], "nombre_visible": "Copa Sudamericana"},
     {"clave": "mls", "ids": ["4346"], "nombre_visible": "MLS (Inter Miami)"},
@@ -433,7 +444,14 @@ def _escudo_manual(nombre_equipo, log):
     try:
         r = requests.head(url, timeout=6)
         if r.status_code == 200:
-            return url
+            # GitHub manda un ETag que cambia cuando se reemplaza el
+            # archivo. Se agrega a la URL como "?v=..." (GitHub ignora
+            # el parametro): asi, si Sebi sube un escudo nuevo con el
+            # mismo nombre, la URL cambia, y la app (que guarda las
+            # imagenes por hash de URL) baja la imagen nueva sola.
+            etag = r.headers.get("ETag") or r.headers.get("Content-Length") or ""
+            version = "".join(c for c in etag if c.isalnum())[:16]
+            return f"{url}?v={version}" if version else url
     except Exception as e:
         log(f"[AVISO] escudo manual '{nombre_equipo}': {e}")
     return None
@@ -618,7 +636,20 @@ def _proximos_por_liga(liga, log):
             eventos = (datos.get("events") if datos else None) or []
             log(f"    -> {liga['nombre_visible']} id {liga_id} dia {dia}: "
                 f"{len(eventos)} evento(s) crudos de la API")
+            ajenos = 0
             for ev in eventos:
+                # TheSportsDB (clave gratuita) a veces ignora el filtro
+                # de liga de eventsday.php y devuelve partidos de OTRAS
+                # competiciones. Como abajo se les pone el nombre de esta
+                # liga, hay que descartar a mano los que no son de ella.
+                id_liga_ev = str(ev.get("idLeague") or "")
+                if id_liga_ev and id_liga_ev not in liga["ids"]:
+                    ajenos += 1
+                    if ajenos <= 3:
+                        log(f"    [DESCARTADO] {liga['nombre_visible']}: "
+                            f"{ev.get('strHomeTeam')} vs {ev.get('strAwayTeam')} "
+                            f"es de otra liga ({ev.get('strLeague')}, id {id_liga_ev})")
+                    continue
                 p = _evento_a_partido(ev, liga["nombre_visible"], log)
                 if not p or p["fecha"].date() != hoy_arg:
                     continue
@@ -726,7 +757,65 @@ def _mismo_equipo(nombre_a, nombre_b):
     return SequenceMatcher(None, a, b).ratio() >= 0.6
 
 
-def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
+def _serializar_partidos_para_disco(partidos):
+    partidos_json = []
+    for p in partidos:
+        q = dict(p)
+        q["fecha"] = p["fecha"].isoformat()
+        partidos_json.append(q)
+    return partidos_json
+
+
+def _deserializar_partidos_de_disco(partidos_json):
+    partidos = []
+    for q in partidos_json:
+        p = dict(q)
+        try:
+            p["fecha"] = datetime.fromisoformat(p["fecha"])
+        except Exception:
+            continue  # entrada corrupta -- se descarta en vez de romper todo
+        partidos.append(p)
+    return partidos
+
+
+def _guardar_partidos_hoy(partidos, log=print):
+    """Guarda en disco los partidos de HOY ya armados y completos, para
+    que la proxima corrida (aunque sea despues de apagar la PC) no
+    tenga que rehacer toda la busqueda pesada de nuevo. Se pisa entero
+    en cada llamada -- por eso alcanza con guardar siempre los del dia
+    actual, nunca se acumulan dias viejos."""
+    try:
+        datos = {
+            "fecha": _fecha_hoy_arg().isoformat(),
+            "partidos": _serializar_partidos_para_disco(partidos),
+        }
+        with open(PARTIDOS_HOY_PATH, "w", encoding="utf-8") as f:
+            json.dump(datos, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log(f"No se pudo guardar partidos_hoy.json (no es grave): {e}")
+
+
+def _cargar_partidos_hoy(log=print):
+    """Devuelve la lista de partidos guardada en partidos_hoy.json SOLO
+    si es de HOY (fecha argentina) -- si el archivo es de otro dia (la
+    PC se prendio un dia distinto al que se guardo) se descarta entero
+    y se vuelve a buscar todo de cero, como siempre. Devuelve None si
+    no hay nada valido para reusar (no existe, es de otro dia, o esta
+    corrupto)."""
+    try:
+        if not os.path.exists(PARTIDOS_HOY_PATH):
+            return None
+        with open(PARTIDOS_HOY_PATH, "r", encoding="utf-8") as f:
+            datos = json.load(f)
+        if datos.get("fecha") != _fecha_hoy_arg().isoformat():
+            return None
+        return _deserializar_partidos_de_disco(datos.get("partidos") or [])
+    except Exception as e:
+        log(f"No se pudo leer partidos_hoy.json, se busca todo de nuevo: {e}")
+        return None
+
+
+def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5, forzar_refresco=False):
     """
     Combina tres fuentes: ESPN y TheSportsDB por competicion, mas
     TheSportsDB por equipo (Boca, Seleccion Argentina) para agarrar
@@ -734,82 +823,105 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
     trackeadas. El mismo partido puede aparecer por dos fuentes
     distintas (ej: Boca jugando la Libertadores) -- en ese caso no se
     duplica, se marca destacado sobre el que ya estaba.
+
+    Antes de salir a pedir todo esto de nuevo, primero chequea si ya
+    hay un archivo local (partidos_hoy.json) con los partidos de HOY
+    guardados de una corrida anterior -- si lo hay, lo usa como base en
+    vez de rehacer la busqueda pesada por las tres fuentes (pensado
+    para cuando la PC se apaga un rato y se prende de nuevo el mismo
+    dia). Con forzar_refresco=True se salta ese atajo y se busca todo
+    de cero igual (lo usa el Subidor de Escudos, donde Sebi puede
+    querer la lista mas actualizada posible al tocar "Actualizar
+    partidos de hoy").
+
+    En cualquiera de los dos casos, al final SIEMPRE se completa (o
+    reintenta completar) el escudo, el logo de competicion y el canal
+    de cada partido -- las funciones que hacen eso ya se fijan solas si
+    a ese partido puntual todavia le falta algo antes de salir a
+    buscarlo, siguiendo siempre el orden local -> github -> api. El
+    resultado final se vuelve a guardar en disco.
     """
-    partidos = []
+    partidos_guardados = None if forzar_refresco else _cargar_partidos_hoy(log)
 
-    def _mismo_partido(a, b):
-        if abs((a["fecha"] - b["fecha"]).total_seconds()) >= 3 * 3600:
-            return False
-        # Normal: mismo local y mismo visitante. Invertido: alguna
-        # fuente (sobre todo el seguimiento por equipo de Boca y
-        # Seleccion) a veces reporta local/visitante al reves respecto
-        # a como lo trae la fuente por competicion -- si no se
-        # contempla este caso, el mismo partido queda duplicado en dos
-        # filas (una con el destacado marcado y otra sin marcar).
-        normal = _mismo_equipo(a["local"], b["local"]) and _mismo_equipo(a["visitante"], b["visitante"])
-        invertido = _mismo_equipo(a["local"], b["visitante"]) and _mismo_equipo(a["visitante"], b["local"])
-        return normal or invertido
+    if partidos_guardados is not None:
+        log(f"[INFO] Usando los {len(partidos_guardados)} partido(s) de hoy ya "
+            f"guardados en local, sin volver a pedir todo de nuevo.")
+        partidos = partidos_guardados
+    else:
+        partidos = []
 
-    def _agregar(lista):
-        for p in lista:
-            existente = next((q for q in partidos if _mismo_partido(p, q)), None)
-            if existente:
-                if p.get("destacado") and not existente.get("destacado"):
-                    existente["destacado"] = True
-                    existente["equipo_destacado"] = p.get("equipo_destacado")
-                if not existente.get("escudo_local") and p.get("escudo_local"):
-                    existente["escudo_local"] = p["escudo_local"]
-                if not existente.get("escudo_visitante") and p.get("escudo_visitante"):
-                    existente["escudo_visitante"] = p["escudo_visitante"]
-                if not existente.get("_tsdb_id_local") and p.get("_tsdb_id_local"):
-                    existente["_tsdb_id_local"] = p["_tsdb_id_local"]
-                if not existente.get("_tsdb_id_visitante") and p.get("_tsdb_id_visitante"):
-                    existente["_tsdb_id_visitante"] = p["_tsdb_id_visitante"]
-                continue
-            partidos.append(p)
+        def _mismo_partido(a, b):
+            if abs((a["fecha"] - b["fecha"]).total_seconds()) >= 3 * 3600:
+                return False
+            # Normal: mismo local y mismo visitante. Invertido: alguna
+            # fuente (sobre todo el seguimiento por equipo de Boca y
+            # Seleccion) a veces reporta local/visitante al reves
+            # respecto a como lo trae la fuente por competicion -- si no
+            # se contempla este caso, el mismo partido queda duplicado
+            # en dos filas (una con el destacado marcado y otra sin
+            # marcar).
+            normal = _mismo_equipo(a["local"], b["local"]) and _mismo_equipo(a["visitante"], b["visitante"])
+            invertido = _mismo_equipo(a["local"], b["visitante"]) and _mismo_equipo(a["visitante"], b["local"])
+            return normal or invertido
 
-    try:
-        _agregar(_partidos_espn(log))
-    except Exception as e:
-        log(f"[ERROR] ESPN fallo por completo: {e}")
+        def _agregar(lista):
+            for p in lista:
+                existente = next((q for q in partidos if _mismo_partido(p, q)), None)
+                if existente:
+                    if p.get("destacado") and not existente.get("destacado"):
+                        existente["destacado"] = True
+                        existente["equipo_destacado"] = p.get("equipo_destacado")
+                    if not existente.get("escudo_local") and p.get("escudo_local"):
+                        existente["escudo_local"] = p["escudo_local"]
+                    if not existente.get("escudo_visitante") and p.get("escudo_visitante"):
+                        existente["escudo_visitante"] = p["escudo_visitante"]
+                    if not existente.get("_tsdb_id_local") and p.get("_tsdb_id_local"):
+                        existente["_tsdb_id_local"] = p["_tsdb_id_local"]
+                    if not existente.get("_tsdb_id_visitante") and p.get("_tsdb_id_visitante"):
+                        existente["_tsdb_id_visitante"] = p["_tsdb_id_visitante"]
+                    continue
+                partidos.append(p)
 
-    for liga in LIGAS:
-        _agregar(_proximos_por_liga(liga, log))
-
-    for equipo in EQUIPOS_DESTACADOS:
         try:
-            _agregar(_proximos_por_equipo(equipo, log))
+            _agregar(_partidos_espn(log))
         except Exception as e:
-            log(f"[ERROR] {equipo['nombre_visible']} fallo por completo: {e}")
+            log(f"[ERROR] ESPN fallo por completo: {e}")
 
-    # El seguimiento por equipo (eventsnext.php) solo devuelve partidos
-    # que TODAVIA NO ARRANCARON -- apenas empieza (o termina) el
-    # partido, deja de aparecer ahi, y el destacado se perdia en el
-    # siguiente refresco aunque el partido siguiera en la lista por el
-    # lado de la competicion. Por eso, aparte de eso, se marca
-    # destacado directamente por nombre en TODOS los partidos ya
-    # encontrados, sin importar el estado del partido ni de que fuente
-    # haya salido.
-    for p in partidos:
-        if p.get("destacado"):
-            continue
+        for liga in LIGAS:
+            _agregar(_proximos_por_liga(liga, log))
+
         for equipo in EQUIPOS_DESTACADOS:
-            if (_es_equipo_destacado(p["local"], equipo["nombre_visible"])
-                    or _es_equipo_destacado(p["visitante"], equipo["nombre_visible"])):
-                p["destacado"] = True
-                p["equipo_destacado"] = equipo["nombre_visible"]
-                break
+            try:
+                _agregar(_proximos_por_equipo(equipo, log))
+            except Exception as e:
+                log(f"[ERROR] {equipo['nombre_visible']} fallo por completo: {e}")
 
-    partidos.sort(key=lambda p: p["fecha"])
+        # El seguimiento por equipo (eventsnext.php) solo devuelve
+        # partidos que TODAVIA NO ARRANCARON -- apenas empieza (o
+        # termina) el partido, deja de aparecer ahi, y el destacado se
+        # perdia en el siguiente refresco aunque el partido siguiera en
+        # la lista por el lado de la competicion. Por eso, aparte de
+        # eso, se marca destacado directamente por nombre en TODOS los
+        # partidos ya encontrados, sin importar el estado del partido
+        # ni de que fuente haya salido.
+        for p in partidos:
+            if p.get("destacado"):
+                continue
+            for equipo in EQUIPOS_DESTACADOS:
+                if (_es_equipo_destacado(p["local"], equipo["nombre_visible"])
+                        or _es_equipo_destacado(p["visitante"], equipo["nombre_visible"])):
+                    p["destacado"] = True
+                    p["equipo_destacado"] = equipo["nombre_visible"]
+                    break
 
-    # Recien aca, uno por uno y solo para los partidos que quedaron en
-    # la lista final (ya filtrados y deduplicados), se completa el
-    # escudo que todavia falte, probando en orden: ID de TheSportsDB
-    # (rapido, si el evento vino de ahi) -> cache en disco por nombre
-    # (equipo ya encontrado en una corrida anterior, no pregunta de
-    # nuevo) -> Wikidata por nombre -> Wikipedia por nombre (red de
-    # contencion final) -> si ninguna lo tiene, se deja el escudo
-    # generico.
+        partidos.sort(key=lambda p: p["fecha"])
+
+    # Recien aca, uno por uno, se completa el escudo/logo/canal que
+    # todavia falte -- tanto si "partidos" vino recien buscado como si
+    # vino del archivo local. Cada una de estas tres funciones ya
+    # devuelve de una el valor actual si el partido ya lo tenia
+    # resuelto, y si no, sale a buscarlo siguiendo el orden local ->
+    # github -> api.
     for p in partidos:
         p["escudo_local"] = _completar_escudo(p.get("escudo_local"), p["local"],
                                                p.get("_tsdb_id_local"), log)
@@ -818,6 +930,7 @@ def obtener_proximos_partidos(config, log=print, cantidad_por_liga=5):
         p["logo_competicion"] = _completar_logo_liga(p["competicion"], log)
         p["canal_tv"] = _completar_canal_tv(p, log)
 
+    _guardar_partidos_hoy(partidos, log)
     return partidos
 
 
@@ -827,28 +940,27 @@ def _completar_logo_liga(nombre_competicion, log):
     el mismo espiritu de cache que los escudos de equipo: una vez
     resuelto, no se vuelve a preguntar nunca mas.
 
-    Orden: cache en disco -> TheSportsDB (lookupleague.php, trae el
-    escudo de la gran mayoria de las competiciones que sigue la app)
-    -> logos_competiciones_manuales/ del repo, para el caso raro de
-    que a alguna le falte.
+    Orden (mismo criterio que _completar_escudo, pedido explicito de
+    Sebi): LOCAL (cache en disco) -> GITHUB
+    (logos_competiciones_manuales/ del repo, subido a mano con el
+    Subidor de Escudos) -> API (TheSportsDB, lookupleague.php).
     """
     clave_disco = f"logoliga:{_texto_normalizado(nombre_competicion)}"
     if clave_disco in _cache_escudos_disco:
         return _cache_escudos_disco[clave_disco]
 
-    liga = _LIGA_POR_NOMBRE.get(nombre_competicion)
-    url = None
-    if liga:
-        for liga_id in liga["ids"]:
-            datos = _pedir(f"{BASE_URL}/lookupleague.php", {"id": liga_id}, log,
-                            contexto=f"logo de {nombre_competicion}")
-            ligas_data = (datos or {}).get("leagues") or []
-            if ligas_data and ligas_data[0].get("strBadge"):
-                url = ligas_data[0]["strBadge"]
-                break
+    url = _logo_liga_manual(nombre_competicion, log)
 
     if not url:
-        url = _logo_liga_manual(nombre_competicion, log)
+        liga = _LIGA_POR_NOMBRE.get(nombre_competicion)
+        if liga:
+            for liga_id in liga["ids"]:
+                datos = _pedir(f"{BASE_URL}/lookupleague.php", {"id": liga_id}, log,
+                                contexto=f"logo de {nombre_competicion}")
+                ligas_data = (datos or {}).get("leagues") or []
+                if ligas_data and ligas_data[0].get("strBadge"):
+                    url = ligas_data[0]["strBadge"]
+                    break
 
     if url:
         _cache_escudos_disco[clave_disco] = url
@@ -1058,35 +1170,56 @@ def _completar_canal_tv(p, log):
 
 def _completar_escudo(escudo_actual, nombre_equipo, tsdb_id, log):
     """
-    Orden de prioridad para resolver el escudo de un equipo:
+    Orden de prioridad para resolver el escudo de un equipo -- primero
+    LOCAL, despues GITHUB, y recien al final las APIS externas (pedido
+    explicito de Sebi: la fuente mas rapida y mas confiable primero,
+    las mas lentas al final):
 
     1. Ya vino resuelto con el partido (ESPN/TheSportsDB lo trajeron
        directo con el evento) -- ni se pregunta.
-    2. TheSportsDB por ID de equipo (rapido, un solo pedido).
-    3. Cache en disco por nombre (equipo ya resuelto en una corrida
-       anterior, sea cual haya sido la fuente que lo encontro).
-    4. escudos_manuales/ del repo (lo que Sebi subio a mano con el
-       Subidor de Escudos) -- se prueba ANTES que las fuentes externas
-       porque si ya esta subido a mano es la fuente mas confiable y
-       ademas la mas rapida (un solo pedido HEAD).
-    5. Wikidata / Wikipedia, como ultimo recurso -- son las que mas
-       tardan (busqueda de QID, varios pedidos), asi que dejarlas al
-       final tambien ayuda a que la lista cargue mas rapido para los
-       equipos que ya tienen escudo manual o en cache.
+    2. LOCAL: cache en disco por nombre (equipo ya resuelto en una
+       corrida anterior, sea cual haya sido la fuente que lo encontro
+       -- incluidas las de mas abajo, ver nota al final).
+    3. GITHUB: escudos_manuales/ del repo (lo que Sebi subio a mano con
+       el Subidor de Escudos) -- un solo pedido HEAD, rapido, y es la
+       fuente manual, la mas confiable de todas.
+    4. API: TheSportsDB por ID de equipo (si el evento trajo uno),
+       despues Wikidata, y Wikipedia como ultimo recurso -- son las
+       que mas tardan (busqueda de QID, varios pedidos).
+
+    Apenas se encuentra el escudo por CUALQUIERA de las fuentes de
+    abajo (github o api) se guarda en la cache de disco, asi la
+    proxima vez ya sale directo por el paso 2 (local) sin volver a
+    pedir nada afuera.
     """
+    clave_disco = f"wiki:{_texto_normalizado(nombre_equipo)}"
+    clave_manual = f"manual:{_texto_normalizado(nombre_equipo)}"
+
+    # GITHUB PRIMERO, SIEMPRE: el escudo subido a mano gana sobre
+    # cualquier otro (el que vino con el partido, la cache o las APIs),
+    # y se vuelve a consultar en cada refresco (un pedido HEAD liviano)
+    # para detectar si Sebi lo reemplazo. Si cambio, la URL cambia
+    # (ver _escudo_manual) y se actualiza solo en la PC.
+    manual = _escudo_manual(nombre_equipo, log)
+    if manual:
+        if _cache_escudos_disco.get(clave_manual) != manual:
+            _cache_escudos_disco[clave_manual] = manual
+            _cache_escudos_disco[clave_disco] = manual
+            _guardar_cache_escudos_disco()
+        return manual
+
+    # Sin internet (o sin escudo manual): ultima version manual
+    # conocida, si hubo alguna, antes que cualquier otra cosa.
+    if _cache_escudos_disco.get(clave_manual):
+        return _cache_escudos_disco[clave_manual]
+
     if escudo_actual:
         return escudo_actual
 
-    if tsdb_id:
-        escudo_actual = _escudo_thesportsdb(tsdb_id, log)
-        if escudo_actual:
-            return escudo_actual
-
-    clave_disco = f"wiki:{_texto_normalizado(nombre_equipo)}"
     if clave_disco in _cache_escudos_disco:
         return _cache_escudos_disco[clave_disco]
 
-    escudo_actual = (_escudo_manual(nombre_equipo, log)
+    escudo_actual = ((_escudo_thesportsdb(tsdb_id, log) if tsdb_id else None)
                       or _escudo_wikidata(nombre_equipo, log)
                       or _escudo_wikipedia(nombre_equipo, log))
     if escudo_actual:
